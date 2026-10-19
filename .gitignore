@@ -1,0 +1,51 @@
+# Dependencies
+node_modules
+.pnpm-store
+
+# Production build outputs
+dist
+dist-ssr
+*.tsbuildinfo
+
+# AI Studio artifacts, cache, and uploaded attachments
+.aistudio
+.cache
+.vite
+public/assets/aistudio/
+
+# Environment variables & secrets
+.env
+.env.local
+.env.*.local
+
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*
+
+# Temporary & Heavy Files / Archives
+uploads/*
+!uploads/.gitkeep
+Converted_Images/
+public/vendor/
+svga00001-main/
+LiveTalk-main/
+app/
+*.zip
+*.tar.gz
+*.rar
+*.7z
+*.iso
+*.exe
+*.bin
+
+# System & IDE files
+.DS_Store
+Thumbs.db
+.vscode/*
+!.vscode/extensions.json
+.idea
+*.suo
+*.sln

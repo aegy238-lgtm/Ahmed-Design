@@ -1,0 +1,1154 @@
+import * as Mp4Muxer from 'mp4-muxer';
+import { FFmpeg } from '@ffmpeg/ffmpeg';
+import { loadFFmpegWithFallbacks } from './ffmpegLoader';
+import { drawUniversalWatermarkOnCanvas, getSavedWatermarkSettings } from './watermarkAndBackground';
+
+export interface VapConfigInfo {
+  v?: number;
+  f?: number;
+  w?: number;
+  h?: number;
+  videoW?: number;
+  videoH?: number;
+  aFrame?: number[];
+  rgbFrame?: number[];
+  fps?: number;
+  orientation?: string;
+  [key: string]: any;
+}
+
+export interface VapConfig {
+  info: VapConfigInfo;
+  [key: string]: any;
+}
+
+export type VapChannelLayout = 
+  | 'left_rgb_right_alpha'
+  | 'right_rgb_left_alpha'
+  | 'top_rgb_bottom_alpha'
+  | 'bottom_rgb_top_alpha'
+  | 'raw_video';
+
+export interface VapDetectionResult {
+  layout: VapChannelLayout;
+  rgbFrame: [number, number, number, number];
+  aFrame: [number, number, number, number];
+  outputWidth: number;
+  outputHeight: number;
+  fps: number;
+  confidence: number;
+  isVap: boolean;
+  label: string;
+}
+
+// Extract VAP / YYEVA configuration JSON from MP4 (vapc, yyea, yyev, udta boxes or raw JSON)
+export const extractVapConfigFromBlob = async (blob: Blob): Promise<VapConfig | null> => {
+  try {
+    const parseAndNormalizeJson = (jsonStr: string): VapConfig | null => {
+      try {
+        const clean = jsonStr.replace(/\0/g, '');
+        const startIdx = clean.indexOf('{');
+        const endIdx = clean.lastIndexOf('}');
+        if (startIdx === -1 || endIdx === -1) return null;
+        const parsed = JSON.parse(clean.substring(startIdx, endIdx + 1));
+        
+        // Normalize YYEVA "descript" or standard "info"
+        const desc = parsed.descript || parsed.info || parsed;
+        const rgbFrame = desc.rgbFrame || [0, 0, desc.width || 750, desc.height || 1334];
+        const aFrame = desc.alphaFrame || desc.aFrame || [rgbFrame[2], 0, rgbFrame[2], rgbFrame[3]];
+        const w = desc.width || desc.w || rgbFrame[2] || 750;
+        const h = desc.height || desc.h || rgbFrame[3] || 1334;
+        
+        // Correctly distinguish framerate (fps, usually 20-60) from total frame count (f/totalFrame, usually 60-300)
+        const fps = (desc.fps && desc.fps > 0 && desc.fps <= 120) 
+          ? desc.fps 
+          : (desc.rate && desc.rate > 0 && desc.rate <= 120 ? desc.rate : 30);
+        
+        const f = (desc.f && desc.f > 0 && desc.f !== fps) 
+          ? desc.f 
+          : (desc.totalFrame || desc.totalFrames || desc.frames || Math.round(fps * 3));
+
+        const videoW = desc.videoWidth || desc.videoW || (rgbFrame[0] + rgbFrame[2] > aFrame[0] + aFrame[2] ? rgbFrame[0] + rgbFrame[2] : aFrame[0] + aFrame[2]);
+        const videoH = desc.videoHeight || desc.videoH || (rgbFrame[1] + rgbFrame[3] > aFrame[1] + aFrame[3] ? rgbFrame[1] + rgbFrame[3] : aFrame[1] + aFrame[3]);
+
+        return {
+          info: {
+            ...desc,
+            w,
+            h,
+            f,
+            fps,
+            videoW: videoW || w * 2,
+            videoH: videoH || h,
+            rgbFrame,
+            aFrame
+          },
+          ...parsed
+        };
+      } catch {
+        return null;
+      }
+    };
+
+    // Box tags: 'vapc', 'yyea', 'yyev', 'udta'
+    const boxTags = [
+      [118, 97, 112, 99], // 'vapc'
+      [121, 121, 101, 97], // 'yyea' (YYEVA)
+      [121, 121, 101, 118], // 'yyev' (YYEVA)
+    ];
+
+    // Scan BOTH the head and the tail of the blob (up to 6MB each or full file)
+    const slicesToScan: Blob[] = [];
+    if (blob.size <= 8 * 1024 * 1024) {
+      slicesToScan.push(blob);
+    } else {
+      // Head (first 5MB - where moov.faststart sits)
+      slicesToScan.push(blob.slice(0, 5 * 1024 * 1024));
+      // Tail (last 5MB - where trailing udta/vapc sits)
+      slicesToScan.push(blob.slice(blob.size - 5 * 1024 * 1024, blob.size));
+    }
+
+    for (const slice of slicesToScan) {
+      const buffer = await slice.arrayBuffer();
+      const uint8 = new Uint8Array(buffer);
+
+      let offset = -1;
+      for (const tag of boxTags) {
+        for (let i = 0; i <= uint8.length - 4; i++) {
+          if (
+            uint8[i] === tag[0] &&
+            uint8[i + 1] === tag[1] &&
+            uint8[i + 2] === tag[2] &&
+            uint8[i + 3] === tag[3]
+          ) {
+            offset = i;
+            break;
+          }
+        }
+        if (offset !== -1) break;
+      }
+
+      if (offset !== -1) {
+        const view = new DataView(buffer);
+        const boxSize = offset >= 4 ? view.getUint32(offset - 4) : uint8.length - offset;
+        const jsonBytes = uint8.slice(offset + 4, offset + 4 + Math.min(boxSize - 8, uint8.length - (offset + 4)));
+        const jsonString = new TextDecoder('utf-8').decode(jsonBytes);
+        const res = parseAndNormalizeJson(jsonString);
+        if (res) return res;
+      }
+
+      // Search for embedded JSON containing "rgbFrame" or "alphaFrame"
+      const decoder = new TextDecoder('utf-8', { fatal: false });
+      const fullText = decoder.decode(uint8);
+      const rgbFrameIdx = fullText.indexOf('rgbFrame');
+      if (rgbFrameIdx !== -1) {
+        const startBrace = fullText.lastIndexOf('{', rgbFrameIdx);
+        if (startBrace !== -1) {
+          const potentialJson = fullText.substring(startBrace, Math.min(fullText.length, startBrace + 4096));
+          const res = parseAndNormalizeJson(potentialJson);
+          if (res) return res;
+        }
+      }
+    }
+  } catch (e) {
+    console.warn('VAP / YYEVA config extraction notice:', e);
+  }
+  return null;
+};
+
+/**
+ * Extract exact mathematical duration from MP4 ISO-BMFF mvhd box
+ * Prevents truncated exports and ensures 100% full duration reproduction
+ */
+export const parseMp4DurationFromBlob = async (blob: Blob): Promise<number | null> => {
+  try {
+    const slicesToScan: Blob[] = [];
+    if (blob.size <= 8 * 1024 * 1024) {
+      slicesToScan.push(blob);
+    } else {
+      slicesToScan.push(blob.slice(0, 5 * 1024 * 1024));
+      slicesToScan.push(blob.slice(blob.size - 5 * 1024 * 1024, blob.size));
+    }
+
+    for (const slice of slicesToScan) {
+      const buffer = await slice.arrayBuffer();
+      const data = new DataView(buffer);
+      const len = buffer.byteLength;
+
+      for (let i = 0; i <= len - 36; i++) {
+        // Look for 'mvhd' (0x6d, 0x76, 0x68, 0x64)
+        if (
+          data.getUint8(i) === 0x6d &&
+          data.getUint8(i + 1) === 0x76 &&
+          data.getUint8(i + 2) === 0x68 &&
+          data.getUint8(i + 3) === 0x64
+        ) {
+          const version = data.getUint8(i + 4);
+          if (version === 0) {
+            // version 0: timescale at offset 16 from 'm', duration at offset 20
+            const timescale = data.getUint32(i + 16);
+            const duration = data.getUint32(i + 20);
+            if (timescale > 0 && duration > 0) {
+              const sec = duration / timescale;
+              if (sec >= 0.05 && sec <= 7200) return sec;
+            }
+          } else if (version === 1) {
+            // version 1: timescale at offset 24, duration (64-bit) at offset 28
+            const timescale = data.getUint32(i + 24);
+            const durHigh = data.getUint32(i + 28);
+            const durLow = data.getUint32(i + 32);
+            const duration = durHigh * 0x100000000 + durLow;
+            if (timescale > 0 && duration > 0) {
+              const sec = duration / timescale;
+              if (sec >= 0.05 && sec <= 7200) return sec;
+            }
+          }
+        }
+      }
+    }
+  } catch (e) {
+    console.warn('Could not parse MP4 mvhd duration:', e);
+  }
+  return null;
+};
+
+/**
+ * Ultra-Smart VAP Channel Layout Detector:
+ * Mathematically detects where RGB color and Alpha transparency masks are placed
+ * by sampling pixel color saturation vs monochrome grayscale characteristics.
+ */
+export const detectVapChannelLayout = (
+  video: HTMLVideoElement,
+  existingConfig?: VapConfig | null
+): VapDetectionResult => {
+  const vw = video.videoWidth || 750;
+  const vh = video.videoHeight || 1334;
+
+  // 1. If explicit valid VAP metadata exists with non-default coordinates, trust it
+  if (existingConfig?.info?.rgbFrame && existingConfig?.info?.aFrame) {
+    const rf = existingConfig.info.rgbFrame;
+    const af = existingConfig.info.aFrame;
+    const outW = rf[2] || Math.round(vw / 2);
+    const outH = rf[3] || vh;
+    const fps = (existingConfig.info.fps && existingConfig.info.fps > 0 && existingConfig.info.fps <= 120)
+      ? existingConfig.info.fps 
+      : 30;
+
+    let layout: VapChannelLayout = 'left_rgb_right_alpha';
+    let label = 'أفقي: يسار RGB / يمين شفافية';
+
+    if (af[0] > rf[0]) {
+      layout = 'left_rgb_right_alpha';
+      label = 'أفقي: يسار RGB / يمين قناع شفافية';
+    } else if (rf[0] > af[0]) {
+      layout = 'right_rgb_left_alpha';
+      label = 'أفقي: يمين RGB / يسار قناع شفافية';
+    } else if (af[1] > rf[1]) {
+      layout = 'top_rgb_bottom_alpha';
+      label = 'عمودي: أعلى RGB / أسفل قناع شفافية';
+    } else if (rf[1] > af[1]) {
+      layout = 'bottom_rgb_top_alpha';
+      label = 'عمودي: أسفل RGB / أعلى قناع شفافية';
+    }
+
+    return {
+      layout,
+      rgbFrame: rf as [number, number, number, number],
+      aFrame: af as [number, number, number, number],
+      outputWidth: outW,
+      outputHeight: outH,
+      fps,
+      confidence: 0.98,
+      isVap: true,
+      label
+    };
+  }
+
+  // 2. Dynamic Optical Frame Analysis
+  try {
+    const canvas = document.createElement('canvas');
+    const sampleW = 200;
+    const sampleH = 200;
+    canvas.width = sampleW;
+    canvas.height = sampleH;
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+
+    if (ctx && video.readyState >= 2) {
+      ctx.drawImage(video, 0, 0, sampleW, sampleH);
+      const imgData = ctx.getImageData(0, 0, sampleW, sampleH).data;
+
+      // Helper to compute color saturation variance vs grayscale score for a quadrant/half
+      const analyzeRegion = (x0: number, y0: number, x1: number, y1: number) => {
+        let totalPixels = 0;
+        let activePixels = 0;
+        let grayscaleCount = 0;
+        let totalSaturation = 0;
+
+        for (let y = y0; y < y1; y += 2) {
+          for (let x = x0; x < x1; x += 2) {
+            const idx = (y * sampleW + x) * 4;
+            const r = imgData[idx];
+            const g = imgData[idx + 1];
+            const b = imgData[idx + 2];
+            totalPixels++;
+
+            const brightness = (r + g + b) / 3;
+            if (brightness > 8) {
+              activePixels++;
+              const maxC = Math.max(r, g, b);
+              const minC = Math.min(r, g, b);
+              const diff = maxC - minC;
+              totalSaturation += diff;
+              if (diff <= 8) {
+                grayscaleCount++;
+              }
+            }
+          }
+        }
+
+        const avgSaturation = activePixels > 0 ? totalSaturation / activePixels : 0;
+        const grayscaleRatio = activePixels > 0 ? grayscaleCount / activePixels : 0;
+        return { activePixels, avgSaturation, grayscaleRatio };
+      };
+
+      // Test Vertical Halves
+      const topHalf = analyzeRegion(0, 0, sampleW, Math.round(sampleH / 2));
+      const bottomHalf = analyzeRegion(0, Math.round(sampleH / 2), sampleW, sampleH);
+
+      // Test Horizontal Halves
+      const leftHalf = analyzeRegion(0, 0, Math.round(sampleW / 2), sampleH);
+      const rightHalf = analyzeRegion(Math.round(sampleW / 2), 0, sampleW, sampleH);
+
+      // Analyze Vertical Split
+      if (vh >= vw) {
+        // Vertical video (e.g. 750x1334)
+        if (bottomHalf.grayscaleRatio > 0.65 && topHalf.grayscaleRatio < 0.45) {
+          return {
+            layout: 'top_rgb_bottom_alpha',
+            rgbFrame: [0, 0, vw, Math.round(vh / 2)],
+            aFrame: [0, Math.round(vh / 2), vw, Math.round(vh / 2)],
+            outputWidth: vw,
+            outputHeight: Math.round(vh / 2),
+            fps: 24,
+            confidence: 0.95,
+            isVap: true,
+            label: 'عمودي: أعلى RGB / أسفل قناع شفافية'
+          };
+        } else if (topHalf.grayscaleRatio > 0.65 && bottomHalf.grayscaleRatio < 0.45) {
+          return {
+            layout: 'bottom_rgb_top_alpha',
+            rgbFrame: [0, Math.round(vh / 2), vw, Math.round(vh / 2)],
+            aFrame: [0, 0, vw, Math.round(vh / 2)],
+            outputWidth: vw,
+            outputHeight: Math.round(vh / 2),
+            fps: 24,
+            confidence: 0.95,
+            isVap: true,
+            label: 'عمودي: أسفل RGB / أعلى قناع شفافية'
+          };
+        }
+      } else {
+        // Horizontal video (e.g. 1500x750)
+        const leftIsAlpha = (leftHalf.grayscaleRatio > 0.55 && (leftHalf.grayscaleRatio > rightHalf.grayscaleRatio + 0.08 || rightHalf.avgSaturation > leftHalf.avgSaturation + 4)) ||
+                            (leftHalf.grayscaleRatio > 0.75 && rightHalf.grayscaleRatio <= 0.75);
+        const rightIsAlpha = (rightHalf.grayscaleRatio > 0.55 && (rightHalf.grayscaleRatio > leftHalf.grayscaleRatio + 0.08 || leftHalf.avgSaturation > rightHalf.avgSaturation + 4)) ||
+                             (rightHalf.grayscaleRatio > 0.75 && leftHalf.grayscaleRatio <= 0.75);
+
+        if (leftIsAlpha && !rightIsAlpha) {
+          return {
+            layout: 'right_rgb_left_alpha',
+            rgbFrame: [Math.round(vw / 2), 0, Math.round(vw / 2), vh],
+            aFrame: [0, 0, Math.round(vw / 2), vh],
+            outputWidth: Math.round(vw / 2),
+            outputHeight: vh,
+            fps: 24,
+            confidence: 0.95,
+            isVap: true,
+            label: 'أفقي: يمين RGB / يسار قناع شفافية (YYEVA)'
+          };
+        } else if (rightIsAlpha) {
+          return {
+            layout: 'left_rgb_right_alpha',
+            rgbFrame: [0, 0, Math.round(vw / 2), vh],
+            aFrame: [Math.round(vw / 2), 0, Math.round(vw / 2), vh],
+            outputWidth: Math.round(vw / 2),
+            outputHeight: vh,
+            fps: 24,
+            confidence: 0.95,
+            isVap: true,
+            label: 'أفقي: يسار RGB / يمين قناع شفافية (VAP)'
+          };
+        }
+      }
+    }
+  } catch (err) {
+    console.warn('Optical VAP frame detection fallback:', err);
+  }
+
+  // 3. Fallback based on physical aspect ratio
+  if (vh > vw && vw > 0) {
+    return {
+      layout: 'top_rgb_bottom_alpha',
+      rgbFrame: [0, 0, vw, Math.round(vh / 2)],
+      aFrame: [0, Math.round(vh / 2), vw, Math.round(vh / 2)],
+      outputWidth: vw,
+      outputHeight: Math.round(vh / 2),
+      fps: 24,
+      confidence: 0.8,
+      isVap: true,
+      label: 'عمودي: أعلى RGB / أسفل شفافية (تلقائي)'
+    };
+  }
+
+  return {
+    layout: 'left_rgb_right_alpha',
+    rgbFrame: [0, 0, Math.round(vw / 2), vh],
+    aFrame: [Math.round(vw / 2), 0, Math.round(vw / 2), vh],
+    outputWidth: Math.round(vw / 2),
+    outputHeight: vh,
+    fps: 24,
+    confidence: 0.8,
+    isVap: true,
+    label: 'أفقي: يسار RGB / يمين شفافية (تلقائي)'
+  };
+};
+
+// Ultra-fast, frame-accurate video frame seeker without keyframe-skipping stutter
+export const seekVideoToFrame = (video: HTMLVideoElement, targetTime: number): Promise<void> => {
+  if (Math.abs(video.currentTime - targetTime) < 0.0005) {
+    return Promise.resolve();
+  }
+
+  return new Promise<void>((resolve) => {
+    let isDone = false;
+    let timerId: any = null;
+
+    const finish = () => {
+      if (!isDone) {
+        isDone = true;
+        if (timerId) clearTimeout(timerId);
+        video.removeEventListener('seeked', onSeeked);
+        video.removeEventListener('error', onError);
+        resolve();
+      }
+    };
+
+    const onSeeked = () => {
+      if (typeof requestAnimationFrame === 'function') {
+        requestAnimationFrame(() => finish());
+      } else {
+        setTimeout(finish, 0);
+      }
+    };
+
+    const onError = () => {
+      finish();
+    };
+
+    // Fast safety timeout in case seeked event is dropped
+    timerId = setTimeout(finish, 150);
+
+    video.addEventListener('seeked', onSeeked, { once: true });
+    video.addEventListener('error', onError, { once: true });
+
+    try {
+      video.currentTime = Math.max(0, targetTime);
+    } catch {
+      finish();
+    }
+  });
+};
+
+// High-performance WebGL VAP Alpha Blending Renderer with automatic 2D Canvas fallback
+export class WebGLVapRenderer {
+  canvas: HTMLCanvasElement;
+  gl: WebGLRenderingContext | null = null;
+  ctx2d: CanvasRenderingContext2D | null = null;
+  scratchCanvas: HTMLCanvasElement | null = null;
+  scratchCtx: CanvasRenderingContext2D | null = null;
+  is2dFallback: boolean = false;
+  program: WebGLProgram | null = null;
+  positionBuffer: WebGLBuffer | null = null;
+  texCoordBuffer: WebGLBuffer | null = null;
+  texture: WebGLTexture | null = null;
+  aPosition: number = -1;
+  aTexCoord: number = -1;
+  uImage: WebGLUniformLocation | null = null;
+  uRgbRect: WebGLUniformLocation | null = null;
+  uAlphaRect: WebGLUniformLocation | null = null;
+  uThreshold: WebGLUniformLocation | null = null;
+  uUnmultiply: WebGLUniformLocation | null = null;
+  uInvertAlpha: WebGLUniformLocation | null = null;
+  uRawMode: WebGLUniformLocation | null = null;
+
+  constructor(width: number, height: number, existingCanvas?: HTMLCanvasElement) {
+    this.canvas = existingCanvas || document.createElement('canvas');
+    this.canvas.width = Math.max(2, width);
+    this.canvas.height = Math.max(2, height);
+    
+    try {
+      let gl: WebGLRenderingContext | null = null;
+      try {
+        gl = this.canvas.getContext('webgl', { alpha: true, premultipliedAlpha: false, preserveDrawingBuffer: true }) || 
+             (this.canvas.getContext('experimental-webgl', { alpha: true, premultipliedAlpha: false, preserveDrawingBuffer: true }) as WebGLRenderingContext);
+      } catch {
+        gl = null;
+      }
+
+      if (!gl) {
+        this.init2dFallback();
+        return;
+      }
+      this.gl = gl;
+
+      const vsSource = `
+        attribute vec2 a_position;
+        attribute vec2 a_texCoord;
+        varying vec2 v_texCoord;
+        void main() {
+          gl_Position = vec4(a_position, 0.0, 1.0);
+          v_texCoord = a_texCoord;
+        }
+      `;
+
+      const fsSource = `
+        precision highp float;
+        varying vec2 v_texCoord;
+        uniform sampler2D u_image;
+        uniform vec4 u_rgbRect;
+        uniform vec4 u_alphaRect;
+        uniform float u_threshold;
+        uniform float u_unmultiply;
+        uniform float u_invertAlpha;
+        uniform float u_rawMode;
+
+        void main() {
+          if (u_rawMode > 0.5) {
+            gl_FragColor = texture2D(u_image, v_texCoord);
+            return;
+          }
+
+          vec2 rgbCoord = vec2(u_rgbRect.x + v_texCoord.x * u_rgbRect.z, u_rgbRect.y + v_texCoord.y * u_rgbRect.w);
+          vec2 alphaCoord = vec2(u_alphaRect.x + v_texCoord.x * u_alphaRect.z, u_alphaRect.y + v_texCoord.y * u_alphaRect.w);
+
+          vec4 rgbPixel = texture2D(u_image, rgbCoord);
+          vec4 alphaPixel = texture2D(u_image, alphaCoord);
+
+          float rawAlpha = 0.299 * alphaPixel.r + 0.587 * alphaPixel.g + 0.114 * alphaPixel.b;
+          if (u_invertAlpha > 0.5) {
+            rawAlpha = 1.0 - rawAlpha;
+          }
+          
+          if (rawAlpha <= u_threshold) {
+              gl_FragColor = vec4(0.0, 0.0, 0.0, 0.0);
+          } else {
+              float aVal = min(1.0, (rawAlpha - u_threshold) / (1.0 - u_threshold));
+              vec3 color = rgbPixel.rgb;
+              if (u_unmultiply > 0.5 && aVal > 0.02) {
+                  color = clamp(color / aVal, 0.0, 1.0);
+              }
+              gl_FragColor = vec4(color, aVal);
+          }
+        }
+      `;
+
+      const compileShader = (type: number, source: string) => {
+        const shader = gl!.createShader(type);
+        if (!shader) return null;
+        gl!.shaderSource(shader, source);
+        gl!.compileShader(shader);
+        if (!gl!.getShaderParameter(shader, gl!.COMPILE_STATUS)) {
+          return null;
+        }
+        return shader;
+      };
+
+      const vs = compileShader(gl.VERTEX_SHADER, vsSource);
+      const fs = compileShader(gl.FRAGMENT_SHADER, fsSource);
+      if (!vs || !fs) {
+        this.init2dFallback();
+        return;
+      }
+
+      this.program = gl.createProgram();
+      if (!this.program) {
+        this.init2dFallback();
+        return;
+      }
+
+      gl.attachShader(this.program, vs);
+      gl.attachShader(this.program, fs);
+      gl.linkProgram(this.program);
+
+      if (!gl.getProgramParameter(this.program, gl.LINK_STATUS)) {
+        this.init2dFallback();
+        return;
+      }
+
+      this.aPosition = gl.getAttribLocation(this.program, 'a_position');
+      this.aTexCoord = gl.getAttribLocation(this.program, 'a_texCoord');
+      this.uImage = gl.getUniformLocation(this.program, 'u_image');
+      this.uRgbRect = gl.getUniformLocation(this.program, 'u_rgbRect');
+      this.uAlphaRect = gl.getUniformLocation(this.program, 'u_alphaRect');
+      this.uThreshold = gl.getUniformLocation(this.program, 'u_threshold');
+      this.uUnmultiply = gl.getUniformLocation(this.program, 'u_unmultiply');
+      this.uInvertAlpha = gl.getUniformLocation(this.program, 'u_invertAlpha');
+      this.uRawMode = gl.getUniformLocation(this.program, 'u_rawMode');
+
+      this.positionBuffer = gl.createBuffer();
+      if (!this.positionBuffer) {
+        this.init2dFallback();
+        return;
+      }
+      gl.bindBuffer(gl.ARRAY_BUFFER, this.positionBuffer);
+      gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([
+        -1.0, -1.0,   1.0, -1.0,   -1.0,  1.0,
+        -1.0,  1.0,   1.0, -1.0,    1.0,  1.0
+      ]), gl.STATIC_DRAW);
+
+      this.texCoordBuffer = gl.createBuffer();
+      if (!this.texCoordBuffer) {
+        this.init2dFallback();
+        return;
+      }
+      gl.bindBuffer(gl.ARRAY_BUFFER, this.texCoordBuffer);
+      gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([
+         0.0,  1.0,   1.0,  1.0,    0.0,  0.0,
+         0.0,  0.0,   1.0,  1.0,    1.0,  0.0
+      ]), gl.STATIC_DRAW);
+
+      this.texture = gl.createTexture();
+      if (!this.texture) {
+        this.init2dFallback();
+        return;
+      }
+      gl.bindTexture(gl.TEXTURE_2D, this.texture);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    } catch {
+      this.init2dFallback();
+    }
+  }
+
+  private init2dFallback() {
+    this.is2dFallback = true;
+    this.gl = null;
+    this.program = null;
+    try {
+      this.ctx2d = this.canvas.getContext('2d', { willReadFrequently: true });
+      this.scratchCanvas = document.createElement('canvas');
+      this.scratchCanvas.width = this.canvas.width;
+      this.scratchCanvas.height = this.canvas.height;
+      this.scratchCtx = this.scratchCanvas.getContext('2d', { willReadFrequently: true });
+    } catch {
+      // 2d canvas context safely handled
+    }
+  }
+
+  resize(w: number, h: number) {
+    if (this.canvas.width !== w || this.canvas.height !== h) {
+      this.canvas.width = Math.max(2, w);
+      this.canvas.height = Math.max(2, h);
+    }
+  }
+
+  render2dFallback(
+    video: HTMLVideoElement,
+    rgbRect: number[],
+    alphaRect: number[],
+    threshold: number = 10,
+    invertAlpha: boolean = false,
+    rawMode: boolean = false
+  ): HTMLCanvasElement {
+    const ctx = this.ctx2d;
+    if (!ctx) return this.canvas;
+
+    const w = this.canvas.width;
+    const h = this.canvas.height;
+    ctx.clearRect(0, 0, w, h);
+
+    if (rawMode) {
+      ctx.drawImage(video, 0, 0, w, h);
+      return this.canvas;
+    }
+
+    const vw = video.videoWidth || w * 2;
+    const vh = video.videoHeight || h;
+
+    const sx = Math.max(0, Math.min(vw - 1, rgbRect[0]));
+    const sy = Math.max(0, Math.min(vh - 1, rgbRect[1]));
+    const sw = Math.max(1, Math.min(vw - sx, rgbRect[2]));
+    const sh = Math.max(1, Math.min(vh - sy, rgbRect[3]));
+
+    // Draw RGB portion
+    ctx.drawImage(video, sx, sy, sw, sh, 0, 0, w, h);
+
+    // Alpha mask portion
+    if (this.scratchCanvas && this.scratchCtx) {
+      if (this.scratchCanvas.width !== w || this.scratchCanvas.height !== h) {
+        this.scratchCanvas.width = w;
+        this.scratchCanvas.height = h;
+      }
+      this.scratchCtx.clearRect(0, 0, w, h);
+      const asx = Math.max(0, Math.min(vw - 1, alphaRect[0]));
+      const asy = Math.max(0, Math.min(vh - 1, alphaRect[1]));
+      const asw = Math.max(1, Math.min(vw - asx, alphaRect[2]));
+      const ash = Math.max(1, Math.min(vh - asy, alphaRect[3]));
+
+      this.scratchCtx.drawImage(video, asx, asy, asw, ash, 0, 0, w, h);
+
+      const rgbData = ctx.getImageData(0, 0, w, h);
+      const alphaData = this.scratchCtx.getImageData(0, 0, w, h);
+      const r = rgbData.data;
+      const a = alphaData.data;
+      const th = threshold;
+
+      for (let p = 0; p < r.length; p += 4) {
+        let rawAlpha = (0.299 * a[p] + 0.587 * a[p + 1] + 0.114 * a[p + 2]) | 0;
+        if (invertAlpha) rawAlpha = 255 - rawAlpha;
+        if (rawAlpha <= th) {
+          r[p + 3] = 0;
+        } else {
+          r[p + 3] = rawAlpha;
+        }
+      }
+      ctx.putImageData(rgbData, 0, 0);
+    }
+
+    return this.canvas;
+  }
+
+  render(
+    video: HTMLVideoElement, 
+    rgbRect: number[], 
+    alphaRect: number[], 
+    threshold: number = 10, 
+    unmultiply: boolean = true,
+    invertAlpha: boolean = false,
+    rawMode: boolean = false
+  ) {
+    if (this.is2dFallback || !this.gl || !this.program) {
+      return this.render2dFallback(video, rgbRect, alphaRect, threshold, invertAlpha, rawMode);
+    }
+
+    const gl = this.gl;
+    const vw = video.videoWidth || 1;
+    const vh = video.videoHeight || 1;
+
+    try {
+      gl.viewport(0, 0, this.canvas.width, this.canvas.height);
+      gl.clearColor(0.0, 0.0, 0.0, 0.0);
+      gl.clear(gl.COLOR_BUFFER_BIT);
+      gl.useProgram(this.program);
+
+      gl.bindBuffer(gl.ARRAY_BUFFER, this.positionBuffer);
+      gl.enableVertexAttribArray(this.aPosition);
+      gl.vertexAttribPointer(this.aPosition, 2, gl.FLOAT, false, 0, 0);
+
+      gl.bindBuffer(gl.ARRAY_BUFFER, this.texCoordBuffer);
+      gl.enableVertexAttribArray(this.aTexCoord);
+      gl.vertexAttribPointer(this.aTexCoord, 2, gl.FLOAT, false, 0, 0);
+
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, this.texture);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, video);
+      gl.uniform1i(this.uImage, 0);
+
+      gl.uniform4f(this.uRgbRect, rgbRect[0]/vw, rgbRect[1]/vh, rgbRect[2]/vw, rgbRect[3]/vh);
+      gl.uniform4f(this.uAlphaRect, alphaRect[0]/vw, alphaRect[1]/vh, alphaRect[2]/vw, alphaRect[3]/vh);
+      gl.uniform1f(this.uThreshold, threshold / 255.0);
+      gl.uniform1f(this.uUnmultiply, unmultiply ? 1.0 : 0.0);
+      gl.uniform1f(this.uInvertAlpha, invertAlpha ? 1.0 : 0.0);
+      gl.uniform1f(this.uRawMode, rawMode ? 1.0 : 0.0);
+
+      gl.drawArrays(gl.TRIANGLES, 0, 6);
+      return this.canvas;
+    } catch {
+      return this.render2dFallback(video, rgbRect, alphaRect, threshold, invertAlpha, rawMode);
+    }
+  }
+}
+
+// Convert Audio File or Video Audio Track to AudioData Chunks for MP4 Muxing
+export const prepareAudioDataChunks = async (
+  audioBlobOrUrl: Blob | string,
+  durationSec: number
+): Promise<any[]> => {
+  try {
+    let arrayBuffer: ArrayBuffer;
+    if (typeof audioBlobOrUrl === 'string') {
+      const response = await fetch(audioBlobOrUrl);
+      arrayBuffer = await response.arrayBuffer();
+    } else {
+      arrayBuffer = await audioBlobOrUrl.arrayBuffer();
+    }
+
+    const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)({
+      sampleRate: 48000
+    });
+
+    let audioBuffer: AudioBuffer;
+    try {
+      audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
+    } catch {
+      await audioCtx.close();
+      return [];
+    }
+
+    const targetSampleRate = 48000;
+    const numChannels = 2;
+    const totalSamples = Math.floor(durationSec * targetSampleRate);
+
+    const leftChannel = audioBuffer.numberOfChannels > 0 ? audioBuffer.getChannelData(0) : new Float32Array(totalSamples);
+    const rightChannel = audioBuffer.numberOfChannels > 1 ? audioBuffer.getChannelData(1) : leftChannel;
+
+    const chunkSize = 1024;
+    const chunks: any[] = [];
+
+    for (let offset = 0; offset < totalSamples; offset += chunkSize) {
+      const currentChunk = Math.min(chunkSize, totalSamples - offset);
+      const planarData = new Float32Array(currentChunk * numChannels);
+
+      for (let s = 0; s < currentChunk; s++) {
+        const srcIdx = (offset + s) % leftChannel.length;
+        planarData[s] = leftChannel[srcIdx] || 0;
+        planarData[currentChunk + s] = rightChannel[srcIdx] || 0;
+      }
+
+      const timestamp = Math.round((offset / targetSampleRate) * 1000000);
+
+      // @ts-ignore
+      const audioData = new AudioData({
+        format: 'f32-planar',
+        sampleRate: targetSampleRate,
+        numberOfFrames: currentChunk,
+        numberOfChannels: 2,
+        timestamp: timestamp,
+        data: planarData,
+      });
+      chunks.push(audioData);
+    }
+
+    await audioCtx.close();
+    return chunks;
+  } catch (e) {
+    console.warn('Audio preparation notice:', e);
+    return [];
+  }
+};
+
+export interface VapExportOptions {
+  file: File;
+  url: string;
+  vapConfig?: VapConfig | null;
+  targetWidth?: number;
+  targetHeight?: number;
+  exportResolution?: 'natural' | '720p' | '1080p';
+  exportQuality?: 'high' | 'medium' | 'low';
+  exportDuration?: number;
+  previewBg?: string | null;
+  watermark?: string | null;
+  wmSettings?: any;
+  onProgress?: (progressPct: number, statusMsg: string) => void;
+  cancelSignal?: { cancelled: boolean };
+}
+
+// Convert a VAP file into a standalone, smooth, high-fidelity MP4 video
+export const convertVapToMp4 = async (options: VapExportOptions): Promise<{ mp4Blob: Blob; buffer: ArrayBuffer }> => {
+  const {
+    file,
+    url,
+    vapConfig: initialConfig,
+    targetWidth,
+    targetHeight,
+    exportResolution = 'natural',
+    exportQuality = 'high',
+    exportDuration,
+    previewBg,
+    watermark,
+    wmSettings,
+    onProgress,
+    cancelSignal
+  } = options;
+
+  onProgress?.(5, 'جاري قراءة بيانات ملف VAP...');
+
+  const config = initialConfig || (await extractVapConfigFromBlob(file));
+  
+  // Load video element
+  const video = document.createElement('video');
+  video.crossOrigin = 'anonymous';
+  video.muted = true;
+  video.playsInline = true;
+  video.src = url;
+
+  await new Promise<void>((resolve, reject) => {
+    let done = false;
+    video.onloadeddata = () => { if (!done) { done = true; resolve(); } };
+    video.onerror = () => { if (!done) { done = true; reject(new Error('فشل تحميل مسار الفيديو')); } };
+    setTimeout(() => { if (!done && video.readyState >= 1) { done = true; resolve(); } }, 4000);
+  });
+
+  const vw = video.videoWidth || 750;
+  const vh = video.videoHeight || 1334;
+  const videoDuration = video.duration || 3;
+  const finalDuration = exportDuration && exportDuration > 0 ? exportDuration : videoDuration;
+  
+  // Robust FPS sanitization: VAP format specs use 'f' for framerate (24-30).
+  // If 'f' was bloated (>60), it was mistakenly written as total frame count in legacy files.
+  let fps = config?.info?.fps || config?.info?.f || 24;
+  if (fps > 60) {
+    if (config?.info?.fps && config.info.fps <= 60) {
+      fps = config.info.fps;
+    } else if (videoDuration > 0) {
+      const estimatedFps = Math.round(fps / videoDuration);
+      fps = estimatedFps >= 15 && estimatedFps <= 60 ? estimatedFps : 30;
+    } else {
+      fps = 30;
+    }
+  }
+  fps = Math.max(15, Math.min(60, Math.round(fps)));
+  const totalFrames = Math.max(1, Math.floor(finalDuration * fps));
+
+  let cfgW = config?.info?.w || Math.round(vw / 2);
+  let cfgH = config?.info?.h || vh;
+  let rawVideoW = config?.info?.videoW || vw;
+  let rawVideoH = config?.info?.videoH || vh;
+
+  let rgbRect = config?.info?.rgbFrame || [0, 0, Math.round(vw / 2), vh];
+  let alphaRect = config?.info?.aFrame || [Math.round(vw / 2), 0, Math.round(vw / 2), vh];
+
+  if (!config?.info?.rgbFrame && vh > vw && vw > 0) {
+    rgbRect = [0, 0, vw, Math.round(vh / 2)];
+    alphaRect = [0, Math.round(vh / 2), vw, Math.round(vh / 2)];
+    cfgW = vw;
+    cfgH = Math.round(vh / 2);
+  }
+
+  const scaleX = vw / (rawVideoW || vw);
+  const scaleY = vh / (rawVideoH || vh);
+
+  const srcRgbX = Math.round(rgbRect[0] * scaleX);
+  const srcRgbY = Math.round(rgbRect[1] * scaleY);
+  const srcRgbW = Math.round(rgbRect[2] * scaleX);
+  const srcRgbH = Math.round(rgbRect[3] * scaleY);
+
+  const srcAlphaX = Math.round(alphaRect[0] * scaleX);
+  const srcAlphaY = Math.round(alphaRect[1] * scaleY);
+  const srcAlphaW = Math.round(alphaRect[2] * scaleX);
+  const srcAlphaH = Math.round(alphaRect[3] * scaleY);
+
+  const makeEven = (n: number) => Math.max(2, n % 2 === 0 ? n : n + 1);
+
+  let outW = targetWidth || cfgW;
+  let outH = targetHeight || cfgH;
+
+  if (exportResolution === '1080p') {
+    if (outH > outW) { outW = 1080; outH = 1920; }
+    else { outW = 1920; outH = 1080; }
+  } else if (exportResolution === '720p') {
+    if (outH > outW) { outW = 720; outH = 1280; }
+    else { outW = 1280; outH = 720; }
+  }
+
+  outW = makeEven(outW);
+  outH = makeEven(outH);
+
+  onProgress?.(10, 'جاري استخراج المسار الصوتي وتجهيز المشفر...');
+
+  let audioDataChunks: any[] = [];
+  try {
+    audioDataChunks = await prepareAudioDataChunks(file, finalDuration);
+  } catch (e) {
+    console.warn('Audio prep error:', e);
+  }
+
+  const hasAudio = audioDataChunks.length > 0;
+
+  const muxer = new Mp4Muxer.Muxer({
+    target: new Mp4Muxer.ArrayBufferTarget(),
+    video: {
+      codec: 'avc',
+      width: outW,
+      height: outH,
+    },
+    audio: hasAudio ? {
+      codec: 'aac',
+      numberOfChannels: 2,
+      sampleRate: 48000,
+    } : undefined,
+    fastStart: 'in-memory',
+  });
+
+  const totalPixels = outW * outH;
+  const codec = totalPixels > 2228224 ? 'avc1.4d0033' : 'avc1.4d002a';
+  let qualityMultiplier = 2.5;
+  if (exportQuality === 'medium') qualityMultiplier = 1.2;
+  if (exportQuality === 'low') qualityMultiplier = 0.6;
+  const minSafeBitrate = Math.max(800000, Math.round(totalPixels * qualityMultiplier));
+  const bitrate = Math.min(25000000, Math.max(minSafeBitrate, exportQuality === 'high' ? 4000000 : 1500000));
+
+  // @ts-ignore
+  const videoEncoder = new VideoEncoder({
+    output: (chunk: any, meta: any) => muxer.addVideoChunk(chunk, meta),
+    error: (e: any) => console.error('VideoEncoder error:', e),
+  });
+
+  videoEncoder.configure({
+    codec: codec,
+    width: outW,
+    height: outH,
+    bitrate: bitrate,
+    framerate: fps,
+    bitrateMode: 'constant',
+    latencyMode: 'realtime',
+    avc: { format: 'avc' }
+  });
+
+  let audioEncoder: any = null;
+  if (hasAudio) {
+    // @ts-ignore
+    audioEncoder = new AudioEncoder({
+      output: (chunk: any, meta: any) => muxer.addAudioChunk(chunk, meta),
+      error: (e: any) => console.error('AudioEncoder error:', e),
+    });
+
+    audioEncoder.configure({
+      codec: 'mp4a.40.2',
+      numberOfChannels: 2,
+      sampleRate: 48000,
+      bitrate: 128000,
+    });
+
+    for (const chunk of audioDataChunks) {
+      audioEncoder.encode(chunk);
+      chunk.close();
+    }
+    await audioEncoder.flush();
+  }
+
+  // Preload background image
+  let bgImgEl: HTMLImageElement | null = null;
+  if (previewBg) {
+    bgImgEl = new Image();
+    bgImgEl.crossOrigin = 'anonymous';
+    bgImgEl.src = previewBg;
+    await new Promise((res) => {
+      if (!bgImgEl) return res(null);
+      bgImgEl.onload = () => res(null);
+      bgImgEl.onerror = () => res(null);
+    });
+  }
+
+  // Preload watermark image
+  let wmImgEl: HTMLImageElement | null = null;
+  if (watermark) {
+    wmImgEl = new Image();
+    wmImgEl.crossOrigin = 'anonymous';
+    wmImgEl.src = watermark;
+    await new Promise((res) => {
+      if (!wmImgEl) return res(null);
+      wmImgEl.onload = () => res(null);
+      wmImgEl.onerror = () => res(null);
+    });
+  }
+
+  // WebGL VAP Renderer
+  let webglRenderer: WebGLVapRenderer | null = null;
+  try {
+    webglRenderer = new WebGLVapRenderer(cfgW, cfgH);
+  } catch (e) {
+    console.warn('WebGL init warning, using 2D fallback:', e);
+  }
+
+  const canvas = document.createElement('canvas');
+  canvas.width = outW;
+  canvas.height = outH;
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  if (!ctx) throw new Error('فشل إنشاء لوحة رسم الفيديو');
+
+  for (let i = 0; i < totalFrames; i++) {
+    if (cancelSignal?.cancelled) {
+      throw new Error('USER_ABORT');
+    }
+
+    const currentTime = Math.min(i / fps, Math.max(0, videoDuration - 0.01));
+    await seekVideoToFrame(video, currentTime);
+
+    ctx.clearRect(0, 0, outW, outH);
+
+    // Background
+    if (bgImgEl && bgImgEl.complete && bgImgEl.naturalWidth > 0) {
+      ctx.drawImage(bgImgEl, 0, 0, outW, outH);
+    } else {
+      ctx.fillStyle = '#0f172a';
+      ctx.fillRect(0, 0, outW, outH);
+    }
+
+    // Render VAP alpha animation
+    if (webglRenderer) {
+      const glCanvas = webglRenderer.render(
+        video,
+        [srcRgbX, srcRgbY, srcRgbW, srcRgbH],
+        [srcAlphaX, srcAlphaY, srcAlphaW, srcAlphaH],
+        10,
+        true
+      );
+      ctx.drawImage(glCanvas, 0, 0, outW, outH);
+    } else {
+      // 2D Canvas extraction fallback
+      const tempCanvas = document.createElement('canvas');
+      tempCanvas.width = cfgW;
+      tempCanvas.height = cfgH;
+      const tCtx = tempCanvas.getContext('2d');
+      if (tCtx) {
+        tCtx.drawImage(video, srcRgbX, srcRgbY, srcRgbW, srcRgbH, 0, 0, cfgW, cfgH);
+        ctx.drawImage(tempCanvas, 0, 0, outW, outH);
+      }
+    }
+
+    // Watermark: only if explicitly enabled by user
+    if ((wmSettings && wmSettings.enabled) || watermark) {
+      const activeSettings = wmSettings || { enabled: true, logoUrl: watermark, type: 'image' };
+      drawUniversalWatermarkOnCanvas(ctx, outW, outH, i, activeSettings, wmImgEl);
+    }
+
+    const frameTimestamp = Math.round((i * 1000000) / fps);
+    const nextTimestamp = Math.round(((i + 1) * 1000000) / fps);
+    const actualDuration = Math.max(1, nextTimestamp - frameTimestamp);
+
+    // @ts-ignore
+    const frame = new VideoFrame(canvas, {
+      timestamp: frameTimestamp,
+      duration: actualDuration,
+    });
+
+    const isKeyFrame = i === 0 || i % Math.max(12, Math.min(30, Math.round(fps))) === 0;
+
+    while (videoEncoder.encodeQueueSize > 10 && !cancelSignal?.cancelled) {
+      await new Promise(r => setTimeout(r, 4));
+    }
+
+    videoEncoder.encode(frame, { keyFrame: isKeyFrame });
+    frame.close();
+
+    if (i % 6 === 0) {
+      await new Promise(r => setTimeout(r, 0));
+    }
+
+    const pct = Math.round(15 + ((i + 1) / totalFrames) * 75);
+    onProgress?.(pct, `تشفير إطار ${i + 1} من ${totalFrames} (${pct}%)`);
+  }
+
+  onProgress?.(92, 'جاري إتمام ملف الفيديو...');
+  await videoEncoder.flush();
+  videoEncoder.close();
+  muxer.finalize();
+
+  const { buffer } = muxer.target as Mp4Muxer.ArrayBufferTarget;
+  const mp4Blob = new Blob([buffer], { type: 'video/mp4' });
+
+  onProgress?.(100, 'تم إنشاء الفيديو بنجاح');
+  return { mp4Blob, buffer };
+};

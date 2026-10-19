@@ -1,0 +1,285 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // ===============================================================
+    // Helper Functions & Strict Access Control
+    // ===============================================================
+    
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+    
+    function isAdmin() {
+      return isAuthenticated() && (
+        (exists(/databases/$(database)/documents/users/$(request.auth.uid)) && 
+         get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin') ||
+        (request.auth.token.email != null && (
+          request.auth.token.email.lower() == "aegy238@gmail.com" ||
+          request.auth.token.email.lower() == "uhbijnokmpl098900@gmail.com" ||
+          request.auth.token.email.lower() == "iejehdgdig@gmail.com"
+        ))
+      );
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    function hasRequiredFields(fields) {
+      return request.resource.data.keys().hasAll(fields);
+    }
+
+    // ===============================================================
+    // Domain Validators
+    // ===============================================================
+
+    function isValidUser(data) {
+      return hasRequiredFields(['id', 'name', 'role', 'status', 'coins', 'freeAttempts', 'createdAt']) &&
+             data.id is string && data.name is string &&
+             data.role in ['admin', 'user'] &&
+             data.status in ['active', 'banned', 'pending'] &&
+             data.coins is number && data.freeAttempts is number;
+    }
+
+    function isValidActivityLog(data) {
+      return hasRequiredFields(['userId', 'userName', 'action', 'details', 'timestamp']) &&
+             (isAuthenticated() ? data.userId == request.auth.uid : data.userId == 'guest_admin') &&
+             data.userName is string &&
+             data.action is string &&
+             data.details is string &&
+             data.timestamp is timestamp;
+    }
+
+    // ===============================================================
+    // Users & Subcollections
+    // ===============================================================
+
+    match /users/{userId} {
+      allow read: if isAuthenticated();
+      // Regular user cannot self-assign admin role or isSuperAdmin
+      allow create: if (
+        isOwner(userId) && 
+        isValidUser(request.resource.data) && 
+        request.resource.data.role == 'user' &&
+        (!('isSuperAdmin' in request.resource.data) || request.resource.data.isSuperAdmin == false)
+      ) || isAdmin();
+      
+      // Regular user cannot escalate their role or modify administrative permissions
+      allow update: if (
+        isOwner(userId) && 
+        isValidUser(request.resource.data) && 
+        request.resource.data.role == resource.data.role &&
+        (!('isSuperAdmin' in request.resource.data) || request.resource.data.isSuperAdmin == resource.data.isSuperAdmin) &&
+        (!('permissions' in request.resource.data) || request.resource.data.permissions == resource.data.permissions) &&
+        (!('status' in request.resource.data) || request.resource.data.status == resource.data.status)
+      ) || isAdmin();
+      
+      allow delete: if isAdmin();
+
+      match /versionHistory/{historyId} {
+        allow read: if isAuthenticated() && (request.auth.uid == userId || isAdmin());
+        allow write: if isAdmin();
+      }
+
+      match /purchased_items/{itemId} {
+        allow read: if isAuthenticated() && (request.auth.uid == userId || isAdmin());
+        allow create, update: if isAuthenticated() && (request.auth.uid == userId || isAdmin());
+        allow delete: if isAdmin();
+      }
+    }
+
+    // ===============================================================
+    // Activity & Audit Logs
+    // ===============================================================
+
+    match /activityLogs/{logId} {
+      allow read: if isAdmin();
+      allow create: if (isAuthenticated() || request.resource.data.userId == 'guest_admin') && isValidActivityLog(request.resource.data);
+      allow update, delete: if isAdmin();
+    }
+
+    match /pro_membership_logs/{logId} {
+      allow read: if isAdmin();
+      allow create: if isAuthenticated() || isAdmin();
+      allow update, delete: if isAdmin();
+    }
+
+    match /cache_activity_logs/{logId} {
+      allow read: if isAdmin();
+      allow create: if isAuthenticated() || isAdmin();
+      allow update, delete: if isAdmin();
+    }
+
+    match /storageActivityLogs/{logId} {
+      allow read: if isAdmin();
+      allow create: if isAuthenticated() || isAdmin();
+      allow update, delete: if isAdmin();
+    }
+
+    // ===============================================================
+    // Products, Categories, Plans & Store
+    // ===============================================================
+
+    match /products/{productId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    match /categories/{categoryId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    match /pro_plans/{planId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    match /orders/{orderId} {
+      allow read: if isAuthenticated() && (resource.data.userId == request.auth.uid || isAdmin());
+      allow create: if isAuthenticated() && request.resource.data.userId == request.auth.uid;
+      allow update, delete: if isAdmin();
+    }
+
+    match /pro_orders/{orderId} {
+      allow read: if isAuthenticated() && (resource.data.userId == request.auth.uid || isAdmin());
+      allow create: if isAuthenticated() && request.resource.data.userId == request.auth.uid;
+      allow update, delete: if isAdmin();
+    }
+
+    // ===============================================================
+    // License Keys & Subscriptions (Tamper-Proof)
+    // ===============================================================
+
+    match /licenseKeys/{keyId} {
+      allow read: if isAuthenticated();
+      allow create, delete: if isAdmin();
+      // Redemption: Users can only mark an unused key as used by themselves with identical payload
+      allow update: if isAdmin() || (
+        isAuthenticated() && 
+        resource.data.isUsed == false && 
+        request.resource.data.isUsed == true && 
+        request.resource.data.usedBy == request.auth.uid &&
+        request.resource.data.key == resource.data.key
+      );
+    }
+
+    match /promoCodes/{codeId} {
+      allow read: if isAuthenticated();
+      allow write: if isAdmin();
+    }
+
+    match /globalUsedPromos/{promoId} {
+      allow read: if isAuthenticated();
+      allow create, update: if isAuthenticated();
+      allow delete: if isAdmin();
+    }
+
+    // ===============================================================
+    // Settings, Security Lists & Banned Records
+    // ===============================================================
+
+    match /settings/{settingId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    match /banned_emails/{emailId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    match /banned_ips/{ipId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    match /banned_devices/{deviceId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    // ===============================================================
+    // Media, Backgrounds & Storage
+    // ===============================================================
+
+    match /presetBackgrounds/{bgId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    match /room_backgrounds/{rbId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    match /banners/{bannerId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    match /announcements/{announcementId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    match /paymentMethods/{pmId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    match /reviews/{reviewId} {
+      allow read: if true;
+      allow create: if isAuthenticated();
+      allow update, delete: if isAdmin();
+    }
+
+    match /files/{fileId} {
+      allow read: if true;
+      allow create: if isAuthenticated() || isAdmin();
+      allow update, delete: if isAdmin() || (isAuthenticated() && resource.data.userId == request.auth.uid);
+    }
+
+    match /user_cache/{fileId} {
+      allow read: if isAuthenticated() && (resource.data.userId == request.auth.uid || isAdmin());
+      allow create: if isAuthenticated() && (request.resource.data.userId == request.auth.uid || isAdmin());
+      allow update: if isAuthenticated() && (resource.data.userId == request.auth.uid || isAdmin());
+      allow delete: if isAdmin() || (isAuthenticated() && resource.data.userId == request.auth.uid);
+    }
+
+    // ===============================================================
+    // Live Rooms, Chat & CP Interaction
+    // ===============================================================
+
+    match /rooms/{roomId} {
+      allow read: if true;
+      allow write: if isAuthenticated();
+
+      match /{subcollection}/{docId} {
+        allow read: if true;
+        allow write: if isAuthenticated();
+      }
+    }
+
+    match /cp_requests/{reqId} {
+      allow read: if isAuthenticated() && (
+        resource.data.receiverId == request.auth.uid || 
+        resource.data.senderId == request.auth.uid || 
+        isAdmin()
+      );
+      allow create: if isAuthenticated();
+      allow update: if isAuthenticated() && (
+        resource.data.receiverId == request.auth.uid || 
+        isAdmin()
+      );
+      allow delete: if isAdmin() || (isAuthenticated() && resource.data.senderId == request.auth.uid);
+    }
+
+    match /transactions/{txId} {
+      allow read: if isAuthenticated() && (resource.data.userId == request.auth.uid || isAdmin());
+      allow create: if isAuthenticated();
+      allow update, delete: if isAdmin();
+    }
+  }
+}
