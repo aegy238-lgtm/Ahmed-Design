@@ -1,4 +1,8 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
+import { parse } from 'protobufjs';
+import pako from 'pako';
+import { svgaSchema } from '../../svga-proto';
+import { isAudioBuffer } from '../../utils/svgaUniversalEngine';
 import { 
   ArrowRight, Upload, Download, Copy, RefreshCw, Trash2, Eye, 
   Grid, LayoutGrid, Layers, Shield, Sparkles, Sliders, Palette, 
@@ -122,22 +126,119 @@ export const ImageCollageStudio: React.FC<ImageCollageStudioProps> = ({ onBack, 
   // Loaded Image elements cache to prevent refetching
   const imageElementsMap = useRef<Map<string, HTMLImageElement>>(new Map());
 
+  // --- Helper to extract preview dataUrl from any supported file (SVGA, MP4, VAP, PNG, GIF, WebP, SVG) ---
+  const extractFilePreviewDataUrl = async (file: File): Promise<string | null> => {
+    const name = file.name.toLowerCase();
+
+    // 1. Standard Image files (PNG, JPG, WebP, SVG, GIF, etc.)
+    if (file.type.startsWith('image/') || /\.(png|jpe?g|webp|svg|gif|bmp|avif)$/i.test(name)) {
+      return new Promise((resolve) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result as string);
+        reader.onerror = () => resolve(null);
+        reader.readAsDataURL(file);
+      });
+    }
+
+    // 2. Video files (MP4, WebM, MOV, VAP)
+    if (file.type.startsWith('video/') || /\.(mp4|webm|mov|vap|avi)$/i.test(name)) {
+      return new Promise((resolve) => {
+        try {
+          const url = URL.createObjectURL(file);
+          const video = document.createElement('video');
+          video.muted = true;
+          video.playsInline = true;
+          video.src = url;
+
+          video.onloadeddata = () => {
+            video.currentTime = Math.min(0.5, (video.duration || 1) / 2);
+          };
+
+          video.onseeked = () => {
+            const canvas = document.createElement('canvas');
+            canvas.width = video.videoWidth || 600;
+            canvas.height = video.videoHeight || 600;
+            const ctx = canvas.getContext('2d');
+            if (ctx) {
+              ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+              const dataUrl = canvas.toDataURL('image/png');
+              URL.revokeObjectURL(url);
+              resolve(dataUrl);
+            } else {
+              URL.revokeObjectURL(url);
+              resolve(null);
+            }
+          };
+
+          video.onerror = () => {
+            URL.revokeObjectURL(url);
+            resolve(null);
+          };
+        } catch {
+          resolve(null);
+        }
+      });
+    }
+
+    // 3. SVGA / SVGA 2.0 animation files
+    if (/\.(svga|svga2|zip|proto)$/i.test(name) || name.includes('svga')) {
+      try {
+        const arrayBuffer = await file.arrayBuffer();
+        const uint8 = new Uint8Array(arrayBuffer);
+        let inflated: Uint8Array;
+        try {
+          inflated = pako.inflate(uint8);
+        } catch {
+          try {
+            inflated = pako.inflateRaw(uint8);
+          } catch {
+            inflated = uint8;
+          }
+        }
+
+        // Try parsing MovieEntity protobuf images
+        const parsedProto = parse(svgaSchema);
+        const MovieEntity = parsedProto.root.lookupType('com.opensource.svga.MovieEntity');
+        const decoded = MovieEntity.decode(inflated) as any;
+
+        if (decoded && decoded.images) {
+          const imgKeys = Object.keys(decoded.images);
+          for (const key of imgKeys) {
+            const rawBytes = decoded.images[key];
+            if (rawBytes && rawBytes.length > 0) {
+              const isAudio = isAudioBuffer(rawBytes) || /\.(mp3|wav|ogg)$/i.test(key);
+              if (!isAudio) {
+                const blob = new Blob([rawBytes], { type: 'image/png' });
+                const dataUrl = await new Promise<string>((res) => {
+                  const r = new FileReader();
+                  r.onload = () => res(r.result as string);
+                  r.readAsDataURL(blob);
+                });
+                if (dataUrl) return dataUrl;
+              }
+            }
+          }
+        }
+      } catch (e) {
+        console.warn('SVGA snapshot fallback:', e);
+      }
+    }
+
+    return null;
+  };
+
   // --- Helper to convert files to CollageImageItem ---
   const processFiles = useCallback(async (files: File[]) => {
-    const validImageFiles = files.filter(f => f.type.startsWith('image/') || /\.(png|jpe?g|webp|svg|gif|bmp|avif)$/i.test(f.name));
-    if (validImageFiles.length === 0) return;
+    if (!files || files.length === 0) return;
 
     const newItems: CollageImageItem[] = [];
 
-    for (let i = 0; i < validImageFiles.length; i++) {
-      const file = validImageFiles[i];
-      const dataUrl = await new Promise<string>((resolve) => {
-        const reader = new FileReader();
-        reader.onload = () => resolve(reader.result as string);
-        reader.readAsDataURL(file);
-      });
+    for (let i = 0; i < files.length; i++) {
+      const file = files[i];
+      const dataUrl = await extractFilePreviewDataUrl(file);
+      if (!dataUrl) continue;
 
-      // Get dimensions
+      // Get natural dimensions of preview image
       const img = new Image();
       img.src = dataUrl;
       await new Promise((resolve) => {
@@ -160,7 +261,9 @@ export const ImageCollageStudio: React.FC<ImageCollageStudioProps> = ({ onBack, 
       });
     }
 
-    setImages(prev => [...prev, ...newItems]);
+    if (newItems.length > 0) {
+      setImages(prev => [...prev, ...newItems]);
+    }
   }, []);
 
   // Handle Initial files if passed

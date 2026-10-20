@@ -50,6 +50,7 @@ import { SvgaActionDock } from './SvgaActionDock';
 import { VideoDurationSpeedModal } from './VideoDurationSpeedModal';
 import { MultiSvgaWatermarkModal } from './MultiSvgaWatermarkModal';
 import { AeExportModal } from './AeExportModal';
+import { SmartSvgaShowcaseModal } from './SmartSvgaShowcaseModal';
 
 const decodeDataToBytes = (data: any): Uint8Array | null => {
   if (!data) return null;
@@ -1137,6 +1138,7 @@ export const MultiSvgaViewer: React.FC<MultiSvgaViewerProps> = ({ onCancel, curr
   };
 
   const [isWatermarkModalOpen, setIsWatermarkModalOpen] = useState(false);
+  const [isShowcaseModalOpen, setIsShowcaseModalOpen] = useState<boolean>(false);
   const [groupFolders, setGroupFolders] = useState<boolean>(false);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -4988,6 +4990,19 @@ export const MultiSvgaViewer: React.FC<MultiSvgaViewerProps> = ({ onCancel, curr
 
           {/* Center/Left: Master Primary Action Buttons */}
           <div className="flex flex-wrap items-center gap-2">
+            {/* Dedicated Showcase Pack Sheet Export Button & Badge */}
+            <button
+              onClick={() => setIsShowcaseModalOpen(true)}
+              className="px-4 py-2 bg-gradient-to-r from-amber-500 via-yellow-400 to-amber-500 hover:from-amber-400 hover:to-yellow-300 text-slate-950 rounded-xl font-black text-xs shadow-lg shadow-amber-500/25 border border-yellow-200 flex items-center gap-2 transition-all hover:scale-105 active:scale-95 cursor-pointer ring-2 ring-amber-400/30"
+              title="تجميع هدايا SVGA وتصديرها كصورة عرض مجمعة احترافية (Showcase Sheet)"
+            >
+              <Sparkles className="w-4 h-4 text-slate-950 animate-pulse" />
+              <span>تصدير كلوحة هدايا مجمعة</span>
+              <span className="px-1.5 py-0.5 bg-black text-amber-300 rounded-md text-[10px] font-black tracking-wide">
+                جديد 📸
+              </span>
+            </button>
+
             {/* Upload Files */}
             <button
               onClick={() => fileInputRef.current?.click()}
@@ -5150,6 +5165,19 @@ export const MultiSvgaViewer: React.FC<MultiSvgaViewerProps> = ({ onCancel, curr
               </div>
 
               <div className="flex flex-wrap items-center gap-3">
+                {/* Button: Export as Showcase Pack Sheet */}
+                <button
+                  onClick={() => setIsShowcaseModalOpen(true)}
+                  className="px-4 py-3 bg-gradient-to-r from-cyan-500 via-teal-400 to-emerald-500 hover:from-cyan-400 hover:to-teal-300 text-slate-950 rounded-2xl font-black text-xs shadow-xl shadow-cyan-500/25 flex items-center gap-2.5 transition-all hover:scale-105 active:scale-95 cursor-pointer border border-cyan-200"
+                  title="فتح نافذة تجميع وتصدير الهدايا كلوحة عرض مجمعة فخمة (Showcase Sheet)"
+                >
+                  <Sparkles className="w-4.5 h-4.5 text-slate-950 stroke-[2.5]" />
+                  <span>📸 تصدير كلوحة هدايا مجمعة (Showcase)</span>
+                  <span className="px-1.5 py-0.5 bg-slate-950 text-cyan-300 rounded-md text-[9px] font-black">
+                    جديد
+                  </span>
+                </button>
+
                 {/* Button 1: Download All Files & Images in One Folder ZIP */}
                 <button
                   onClick={handleDownloadAllInOneFolderZip}
@@ -6467,6 +6495,14 @@ export const MultiSvgaViewer: React.FC<MultiSvgaViewerProps> = ({ onCancel, curr
         }}
       />
 
+      {/* Smart SVGA Gift Showcase Collage Sheet Modal */}
+      <SmartSvgaShowcaseModal
+        isOpen={isShowcaseModalOpen}
+        onClose={() => setIsShowcaseModalOpen(false)}
+        items={items}
+        onCaptureFrame={captureBestGiftFrame}
+      />
+
       {/* VAP Batch Export Progress Modal */}
       <AnimatePresence>
         {vapBatchProgress?.isOpen && (
@@ -7507,6 +7543,8 @@ const SvgaCard: React.FC<{
         {previewBg && <img src={previewBg} alt="Background" className="absolute inset-0 w-full h-full object-cover z-0 pointer-events-none" referrerPolicy="no-referrer" />}
         <div 
           ref={containerRef} 
+          id={`svga-container-${item.id}`}
+          data-svga-id={item.id}
           className="z-10 pointer-events-none"
         />
 

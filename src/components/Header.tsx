@@ -191,13 +191,14 @@ export const Header: React.FC<HeaderProps> = (props) => {
   const isFeatureAllowed = (toolId: string) => {
     if (toolId === 'after-effects-studio' || toolId === 'afterEffectsStudio') return true;
     if (toolId === 'svga-layer-editor' || toolId === 'svgaLayerEditor') return true;
+    if (toolId === 'image-collage-studio' || toolId === 'imageCollageStudio') return true;
     if (toolId === 'apk-extractor' || toolId === 'apkExtractor') return true;
     if (toolId === 'smart-mp4-studio' || toolId === 'smartMp4Studio') return true;
     if (!props.currentUser) return true;
     if (props.currentUser.allFeaturesEnabled !== false) return true;
     const allowed = props.currentUser.allowedFeatures || [];
     const featureKey = TOOL_FEATURE_MAP[toolId] || toolId;
-    return allowed.includes(featureKey) || featureKey === 'afterEffectsStudio' || featureKey === 'svgaLayerEditor' || featureKey === 'apkExtractor' || featureKey === 'smartMp4Studio';
+    return allowed.includes(featureKey) || featureKey === 'afterEffectsStudio' || featureKey === 'svgaLayerEditor' || featureKey === 'imageCollageStudio' || featureKey === 'apkExtractor' || featureKey === 'smartMp4Studio';
   };
 
   // Dynamic allowed tools from unified TOOLS_REGISTRY
@@ -205,17 +206,19 @@ export const Header: React.FC<HeaderProps> = (props) => {
     return TOOLS_REGISTRY.filter(t => isFeatureAllowed(t.id));
   }, [props.currentUser]);
 
-  // Separate top bar tools: 2 core VIP hero tools in fixed section, all remaining tools in scrollable area
+  // Separate top bar tools: 3 core hero tools in fixed section, all remaining tools in scrollable area
   const { starredNavTools, unstarredNavTools } = useMemo(() => {
     const validTools = allTools.filter(t => !t.hideFromTopNav && t.id !== 'pag-to-svga');
     
-    // Always place after-effects-studio and svga-layer-editor (زر الطبقات المطلوب) prominently in primary section
+    // Always place after-effects-studio, svga-layer-editor, and image-collage-studio prominently in primary section
     const aeTool = validTools.find(t => t.id === 'after-effects-studio');
     const layerEditorTool = validTools.find(t => t.id === 'svga-layer-editor');
+    const collageTool = validTools.find(t => t.id === 'image-collage-studio');
 
     const primaryFixed: ToolDefinition[] = [];
     if (aeTool) primaryFixed.push(aeTool);
     if (layerEditorTool) primaryFixed.push(layerEditorTool);
+    if (collageTool) primaryFixed.push(collageTool);
     
     // Remaining tools in scrollable area, with user-starred tools placed first
     const remaining = validTools.filter(t => !primaryFixed.some(st => st.id === t.id));
@@ -430,6 +433,7 @@ export const Header: React.FC<HeaderProps> = (props) => {
     const isToolActive = props.currentTab === tool.id;
     const isAfterEffects = tool.id === 'after-effects-studio';
     const isLayerEditor = tool.id === 'svga-layer-editor';
+    const isCollageStudio = tool.id === 'image-collage-studio';
     const displayLabel = tool.shortLabel || tool.label;
 
     return (
@@ -466,6 +470,10 @@ export const Header: React.FC<HeaderProps> = (props) => {
                 ? isToolActive
                   ? 'bg-gradient-to-r from-amber-500 via-yellow-400 to-amber-600 text-black font-black shadow-[0_0_24px_rgba(245,158,11,0.7)] border-amber-200 scale-[1.02]'
                   : 'bg-gradient-to-r from-amber-500/25 via-yellow-500/20 to-amber-600/25 hover:from-amber-500/40 hover:to-amber-600/40 text-amber-200 hover:text-amber-100 border-amber-500/60 hover:border-amber-400 shadow-[0_0_16px_rgba(245,158,11,0.3)] font-black'
+              : isCollageStudio
+                ? isToolActive
+                  ? 'bg-gradient-to-r from-cyan-500 via-teal-400 to-emerald-500 text-black font-black shadow-[0_0_24px_rgba(6,182,212,0.85)] border-cyan-200 scale-[1.02]'
+                  : 'bg-gradient-to-r from-cyan-600/35 via-teal-600/30 to-emerald-600/35 hover:from-cyan-500/60 hover:to-emerald-600/60 text-cyan-100 hover:text-white border-cyan-400/80 hover:border-cyan-300 shadow-[0_0_16px_rgba(6,182,212,0.45)] font-black'
               : isToolActive 
                 ? tool.isVip
                   ? 'bg-gradient-to-r from-amber-500 via-yellow-400 to-amber-600 text-black font-black shadow-[0_0_24px_rgba(245,158,11,0.65)] border border-amber-200 scale-[1.02]'
@@ -494,6 +502,8 @@ export const Header: React.FC<HeaderProps> = (props) => {
             <Film className="w-4 h-4 text-red-300 fill-red-500/30 shrink-0" />
           ) : isLayerEditor ? (
             <Layers className="w-4 h-4 text-amber-400 shrink-0" />
+          ) : isCollageStudio ? (
+            <LayoutGrid className="w-4 h-4 text-cyan-300 shrink-0" />
           ) : (
             React.cloneElement(tool.icon as React.ReactElement<any>, { className: 'w-4 h-4 shrink-0' })
           )}
@@ -504,13 +514,17 @@ export const Header: React.FC<HeaderProps> = (props) => {
             <span className="text-[9px] font-black px-1.5 py-0.5 rounded-full bg-red-600 text-white shadow-[0_0_10px_rgba(239,68,68,0.9)] shrink-0 border border-red-300 leading-none">
               PRO 🎬
             </span>
+          ) : isCollageStudio ? (
+            <span className="text-[9px] font-black px-1.5 py-0.5 rounded-full bg-cyan-400 text-black shadow-[0_0_10px_rgba(6,182,212,0.8)] shrink-0 leading-none select-none">
+              جديد 🖼️
+            </span>
           ) : (tool.isVip || isLayerEditor || props.settings?.vibFeatures?.includes(tool.id)) ? (
             <span className="text-[9px] font-black px-1.5 py-0.5 rounded-full bg-gradient-to-r from-amber-400 to-yellow-300 text-black shadow-[0_0_10px_rgba(251,191,36,0.6)] shrink-0 leading-none select-none">
               VIP 👑
             </span>
           ) : null}
 
-          {tool.highlight && !isToolActive && !isItemStarred && !tool.isVip && !isAfterEffects && !isLayerEditor && (
+          {tool.highlight && !isToolActive && !isItemStarred && !tool.isVip && !isAfterEffects && !isLayerEditor && !isCollageStudio && (
             <span className="w-1.5 h-1.5 rounded-full bg-cyan-400 animate-pulse shrink-0"></span>
           )}
 

@@ -323,11 +323,11 @@ export const Uploader: React.FC<UploaderProps> = ({
             {onImageCollageStudioOpen && (
               <button 
                 onClick={(e) => { e.stopPropagation(); onImageCollageStudioOpen(); }}
-                className="flex items-center justify-center gap-2 px-4 py-2.5 bg-gradient-to-r from-cyan-500/20 via-indigo-600/25 to-purple-600/20 hover:from-cyan-500/35 hover:to-purple-600/35 text-cyan-200 border border-cyan-400/50 hover:border-cyan-400 rounded-xl text-xs font-black transition-all cursor-pointer shadow-[0_0_20px_rgba(6,182,212,0.2)] hover:shadow-[0_0_30px_rgba(6,182,212,0.4)] hover:scale-105 active:scale-95"
-                title="تجميع وترتيب عشرات ومئات الصور في شبكة أو كتالوج وحمايتها بالعلامة المائية"
+                className="flex items-center justify-center gap-2 px-4 py-2.5 bg-gradient-to-r from-cyan-600/35 via-teal-600/30 to-emerald-600/35 hover:from-cyan-500/60 hover:to-emerald-600/60 text-cyan-100 hover:text-white border-2 border-cyan-400/80 hover:border-cyan-300 rounded-xl text-xs font-black transition-all cursor-pointer shadow-[0_0_25px_rgba(6,182,212,0.45)] hover:shadow-[0_0_35px_rgba(6,182,212,0.7)] hover:scale-105 active:scale-95"
+                title="استوديو تجميع الصور: رفع وتجميع هدايا وإطارات وشعارات في لوحة واحدة فائقة الجودة وحمايتها بالعلامة المائية"
               >
                  <LayoutGrid className="w-4 h-4 text-cyan-300 animate-pulse" />
-                 <span>تجميع الصور والعلامة المائية (Collage Pro) 👑</span>
+                 <span>استوديو تجميع الصور كـ Preview Sheets 🖼️✨</span>
               </button>
             )}
 
