@@ -183,6 +183,7 @@ export const TOOLS_REGISTRY: ToolRegistryItem[] = [
   {
     id: 'svga-compressor',
     label: 'SVGA & VAP Batch Compressor',
+    shortLabel: 'ضغط SVGA & VAP',
     icon: <Zap className="w-4 h-4 text-amber-400" />,
     category: 'svga',
     categoryNameAr: 'أنيميشن و SVGA',
@@ -196,6 +197,7 @@ export const TOOLS_REGISTRY: ToolRegistryItem[] = [
   {
     id: 'batch-svga-converter',
     label: 'Batch SVGA Converter (MP4/VAP/YYEVA)',
+    shortLabel: 'محول دفعات SVGA',
     icon: <Video className="w-4 h-4 text-pink-400" />,
     category: 'svga',
     categoryNameAr: 'أنيميشن و SVGA',
@@ -209,6 +211,7 @@ export const TOOLS_REGISTRY: ToolRegistryItem[] = [
   {
     id: 'svga-ex',
     label: 'SVGA Editor EX',
+    shortLabel: 'محرر SVGA EX',
     icon: <Layers className="w-4 h-4 text-indigo-400" />,
     category: 'svga',
     categoryNameAr: 'أنيميشن و SVGA',
@@ -223,6 +226,7 @@ export const TOOLS_REGISTRY: ToolRegistryItem[] = [
   {
     id: 'multi-svga',
     label: 'Multi SVGA Preview',
+    shortLabel: 'معاينة متعددة',
     icon: <LayoutGrid className="w-4 h-4 text-blue-400" />,
     category: 'svga',
     categoryNameAr: 'أنيميشن و SVGA',
@@ -235,6 +239,7 @@ export const TOOLS_REGISTRY: ToolRegistryItem[] = [
   {
     id: 'image-converter',
     label: 'Image to SVGA',
+    shortLabel: 'صورة إلى SVGA',
     icon: <Image className="w-4 h-4 text-emerald-400" />,
     category: 'svga',
     categoryNameAr: 'أنيميشن و SVGA',
@@ -249,7 +254,7 @@ export const TOOLS_REGISTRY: ToolRegistryItem[] = [
   {
     id: 'image-collage-studio',
     label: 'تجميع وترتيب الصور والعلامة المائية',
-    shortLabel: 'تجميع الصور وحمايتها',
+    shortLabel: 'تجميع الصور',
     icon: <LayoutGrid className="w-4 h-4 text-cyan-400" />,
     category: 'image',
     categoryNameAr: 'معالجة الصور والذكاء الاصطناعي',
@@ -264,6 +269,7 @@ export const TOOLS_REGISTRY: ToolRegistryItem[] = [
   {
     id: 'ai-video-matting',
     label: 'AI Video Matting Studio',
+    shortLabel: 'عزل الخلفية AI',
     icon: <Sparkles className="w-4 h-4 text-cyan-400" />,
     category: 'image',
     categoryNameAr: 'معالجة الصور والذكاء الاصطناعي',
@@ -277,6 +283,7 @@ export const TOOLS_REGISTRY: ToolRegistryItem[] = [
   {
     id: 'name-3d',
     label: '3D Theme Editor',
+    shortLabel: 'محرر 3D',
     icon: <Sparkles className="w-4 h-4 text-violet-400" />,
     category: 'image',
     categoryNameAr: 'معالجة الصور والذكاء الاصطناعي',
@@ -290,6 +297,7 @@ export const TOOLS_REGISTRY: ToolRegistryItem[] = [
   {
     id: 'image-enhancer',
     label: 'AI Image Enhancer',
+    shortLabel: 'تحسين الصور AI',
     icon: <Sparkles className="w-4 h-4 text-yellow-400" />,
     category: 'image',
     categoryNameAr: 'معالجة الصور والذكاء الاصطناعي',
@@ -303,6 +311,7 @@ export const TOOLS_REGISTRY: ToolRegistryItem[] = [
   {
     id: 'image-processor',
     label: 'Image Processor',
+    shortLabel: 'معالج الصور',
     icon: <Wand2 className="w-4 h-4 text-rose-400" />,
     category: 'image',
     categoryNameAr: 'معالجة الصور والذكاء الاصطناعي',
@@ -315,6 +324,7 @@ export const TOOLS_REGISTRY: ToolRegistryItem[] = [
   {
     id: 'image-editor',
     label: 'Image Editor',
+    shortLabel: 'محرر الصور',
     icon: <Scissors className="w-4 h-4 text-teal-400" />,
     category: 'image',
     categoryNameAr: 'معالجة الصور والذكاء الاصطناعي',
@@ -327,6 +337,7 @@ export const TOOLS_REGISTRY: ToolRegistryItem[] = [
   {
     id: 'image-matcher',
     label: 'Image Matcher',
+    shortLabel: 'مطابقة الألوان',
     icon: <Maximize className="w-4 h-4 text-sky-400" />,
     category: 'image',
     categoryNameAr: 'معالجة الصور والذكاء الاصطناعي',
@@ -341,6 +352,7 @@ export const TOOLS_REGISTRY: ToolRegistryItem[] = [
   {
     id: 'audio-extractor',
     label: 'Audio Extractor',
+    shortLabel: 'استخراج الصوت',
     icon: <Video className="w-4 h-4 text-blue-400" />,
     category: 'audio',
     categoryNameAr: 'أدوات الصوت والميديا',
@@ -356,6 +368,7 @@ export const TOOLS_REGISTRY: ToolRegistryItem[] = [
   {
     id: 'batch-image-processor',
     label: 'Batch Image Processor',
+    shortLabel: 'دفعات الصور',
     icon: <Image className="w-4 h-4 text-amber-400" />,
     category: 'batch',
     categoryNameAr: 'المعالجة الجماعية (Batch)',
@@ -368,6 +381,7 @@ export const TOOLS_REGISTRY: ToolRegistryItem[] = [
   {
     id: 'batch',
     label: 'Batch Compress',
+    shortLabel: 'ضغط الصور',
     icon: <Layers className="w-4 h-4 text-orange-400" />,
     category: 'batch',
     categoryNameAr: 'المعالجة الجماعية (Batch)',
@@ -380,6 +394,7 @@ export const TOOLS_REGISTRY: ToolRegistryItem[] = [
   {
     id: 'cropper',
     label: 'Smart Auto Crop & Detection',
+    shortLabel: 'القص الذكي',
     icon: <Scissors className="w-4 h-4 text-emerald-400" />,
     category: 'batch',
     categoryNameAr: 'المعالجة الجماعية (Batch)',
@@ -393,6 +408,7 @@ export const TOOLS_REGISTRY: ToolRegistryItem[] = [
   {
     id: 'animation-manager',
     label: 'مدير ومحول الأنميشن',
+    shortLabel: 'مدير الأنميشن',
     icon: <Box className="w-4 h-4 text-cyan-400" />,
     category: 'svga',
     categoryNameAr: 'أنيميشن و SVGA',
@@ -406,6 +422,7 @@ export const TOOLS_REGISTRY: ToolRegistryItem[] = [
   {
     id: 'vap-hub',
     label: 'VAP & YYEVA Hub',
+    shortLabel: 'VAP & YYEVA',
     icon: <Film className="w-4 h-4 text-pink-400" />,
     category: 'svga',
     categoryNameAr: 'أنيميشن و SVGA',
@@ -419,6 +436,7 @@ export const TOOLS_REGISTRY: ToolRegistryItem[] = [
   {
     id: 'store',
     label: 'مكتبة ومتجر أصول SVGA',
+    shortLabel: 'متجر SVGA',
     icon: <ShoppingBag className="w-4 h-4 text-fuchsia-400" />,
     category: 'store',
     categoryNameAr: 'المتجر والأصول',
@@ -432,6 +450,7 @@ export const TOOLS_REGISTRY: ToolRegistryItem[] = [
   {
     id: 'converter',
     label: 'Video Converter',
+    shortLabel: 'محول الفيديو',
     icon: <Video className="w-4 h-4 text-red-400" />,
     category: 'batch',
     categoryNameAr: 'المعالجة الجماعية (Batch)',

@@ -940,7 +940,8 @@ const App: React.FC = () => {
   }
 
   // 🔒 Dedicated Fullscreen Authentication Gateway
-  if (!currentUser) {
+  const isAutostart = typeof window !== 'undefined' && new URLSearchParams(window.location.search).get('autostart') === '1';
+  if (!currentUser && !isAutostart) {
     const rawAuthBg = settings?.backgroundUrl ? settings.backgroundUrl.trim() : '';
     const isVideoAuth = !!(rawAuthBg && isVideoUrl(rawAuthBg));
     const hasCustomBg = !!(rawAuthBg && !rawAuthBg.includes('unsplash') && !isVideoAuth);

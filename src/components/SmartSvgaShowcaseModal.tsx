@@ -4,8 +4,10 @@ import {
   X, Download, Copy, Sparkles, RefreshCw, Move, Layers, Grid, 
   LayoutGrid, Sliders, Palette, Type, Check, Upload, Eye, EyeOff,
   ZoomIn, ZoomOut, RotateCw, Trash2, ShieldCheck, Heart, Package,
-  Maximize2, Plus, ArrowUp, ArrowDown, FileImage, Image as ImageIcon
+  Maximize2, Plus, ArrowUp, ArrowDown, FileImage, Image as ImageIcon,
+  FolderArchive, Split, FolderPlus, Layers2, CheckCircle2, ChevronRight
 } from 'lucide-react';
+import JSZip from 'jszip';
 import pako from 'pako';
 import { parse } from 'protobufjs';
 import { svgaSchema } from '../svga-proto';
@@ -25,12 +27,19 @@ export interface ShowcaseGiftItem {
   rotation: number;
   zIndex: number;
   visible: boolean;
+  packageId?: string;
   category?: 'hero' | 'frame' | 'banner' | 'badge' | 'card' | 'normal';
+}
+
+export interface ShowcasePackage {
+  id: string;
+  name: string;
+  itemIds: string[];
 }
 
 export type SmartLayoutPreset = 
   | 'vip_showcase'       // Exact layout of Screenshot_2026-10-20_143022_04a1f7b7.png (Tall heroes left, frames/banners right)
-  | 'gold_catalog'        // Exact layout of VIP_GIFT_PACK_Showcase__6__0819bbf8.png (2x3 or 3x3 gold luxury grid with tags)
+  | 'gold_catalog'       // Exact layout of VIP_GIFT_PACK_Showcase__6__0819bbf8.png (2x3 or 3x3 gold luxury grid with tags)
   | 'podium_hierarchy'   // Podium center hero with tiered side wings
   | 'horizontal_banner'  // Panoramic showcase strip
   | 'vertical_story'     // 9:16 mobile story
@@ -50,6 +59,8 @@ interface SmartSvgaShowcaseModalProps {
     type?: string;
     coverBlob?: Blob;
     videoItem?: any;
+    folderName?: string;
+    folderPath?: string;
     [key: string]: any;
   }>;
   onCaptureFrame?: (item: any) => Promise<Blob>;
@@ -116,7 +127,6 @@ function trimTransparentCanvas(sourceCanvas: HTMLCanvasElement): { canvas: HTMLC
 
     let top = -1, bottom = -1, left = -1, right = -1;
 
-    // Scan top
     for (let y = 0; y < h; y++) {
       for (let x = 0; x < w; x++) {
         if ((data[y * w + x] & 0xFF000000) !== 0) {
@@ -128,11 +138,9 @@ function trimTransparentCanvas(sourceCanvas: HTMLCanvasElement): { canvas: HTMLC
     }
 
     if (top === -1) {
-      // Entirely transparent
       return { canvas: sourceCanvas, width: w, height: h };
     }
 
-    // Scan bottom
     for (let y = h - 1; y >= top; y--) {
       for (let x = 0; x < w; x++) {
         if ((data[y * w + x] & 0xFF000000) !== 0) {
@@ -143,7 +151,6 @@ function trimTransparentCanvas(sourceCanvas: HTMLCanvasElement): { canvas: HTMLC
       if (bottom !== -1) break;
     }
 
-    // Scan left
     for (let x = 0; x < w; x++) {
       for (let y = top; y <= bottom; y++) {
         if ((data[y * w + x] & 0xFF000000) !== 0) {
@@ -154,7 +161,6 @@ function trimTransparentCanvas(sourceCanvas: HTMLCanvasElement): { canvas: HTMLC
       if (left !== -1) break;
     }
 
-    // Scan right
     for (let x = w - 1; x >= left; x--) {
       for (let y = top; y <= bottom; y++) {
         if ((data[y * w + x] & 0xFF000000) !== 0) {
@@ -167,8 +173,6 @@ function trimTransparentCanvas(sourceCanvas: HTMLCanvasElement): { canvas: HTMLC
 
     const trimW = right - left + 1;
     const trimH = bottom - top + 1;
-
-    // Add 4px padding so edges don't get clipped
     const pad = 4;
     const finalW = trimW + pad * 2;
     const finalH = trimH + pad * 2;
@@ -181,9 +185,7 @@ function trimTransparentCanvas(sourceCanvas: HTMLCanvasElement): { canvas: HTMLC
       tCtx.drawImage(sourceCanvas, left, top, trimW, trimH, pad, pad, trimW, trimH);
       return { canvas: trimmedCanvas, width: finalW, height: finalH };
     }
-  } catch (e) {
-    // If CORS or error, return original
-  }
+  } catch (e) {}
 
   return { canvas: sourceCanvas, width: w, height: h };
 }
@@ -223,6 +225,74 @@ async function measureImageIntrinsicSize(src: string): Promise<{ width: number; 
   });
 }
 
+// STRICT COLLISION RESOLUTION: Guarantees zero overlapping images on the canvas
+function resolveCollisions(items: ShowcaseGiftItem[], canvasW: number, canvasH: number, padding = 16): ShowcaseGiftItem[] {
+  const result = items.map(item => ({ ...item }));
+  let hasOverlap = true;
+  let iterations = 0;
+  const maxIterations = 20;
+
+  while (hasOverlap && iterations < maxIterations) {
+    hasOverlap = false;
+    iterations++;
+
+    for (let i = 0; i < result.length; i++) {
+      for (let j = i + 1; j < result.length; j++) {
+        const a = result[i];
+        const b = result[j];
+        if (!a.visible || !b.visible) continue;
+
+        const aLeft = a.x;
+        const aRight = a.x + a.width;
+        const aTop = a.y;
+        const aBottom = a.y + a.height;
+
+        const bLeft = b.x;
+        const bRight = b.x + b.width;
+        const bTop = b.y;
+        const bBottom = b.y + b.height;
+
+        // Check bounding box intersection with safety padding
+        const intersects = !(
+          aRight + padding <= bLeft ||
+          bRight + padding <= aLeft ||
+          aBottom + padding <= bTop ||
+          bBottom + padding <= aTop
+        );
+
+        if (intersects) {
+          hasOverlap = true;
+          // Calculate overlap depth
+          const overlapX = Math.min(aRight - bLeft, bRight - aLeft) + padding;
+          const overlapY = Math.min(aBottom - bTop, bBottom - aTop) + padding;
+
+          if (overlapX < overlapY) {
+            // Shift horizontally
+            if (a.x < b.x) {
+              b.x = Math.min(canvasW - b.width - 20, b.x + Math.ceil(overlapX / 2));
+              a.x = Math.max(20, a.x - Math.ceil(overlapX / 2));
+            } else {
+              a.x = Math.min(canvasW - a.width - 20, a.x + Math.ceil(overlapX / 2));
+              b.x = Math.max(20, b.x - Math.ceil(overlapX / 2));
+            }
+          } else {
+            // Shift vertically
+            if (a.y < b.y) {
+              b.y = Math.min(canvasH - b.height - 20, b.y + Math.ceil(overlapY / 2));
+              a.y = Math.max(20, a.y - Math.ceil(overlapY / 2));
+            } else {
+              a.y = Math.min(canvasH - a.height - 20, a.y + Math.ceil(overlapY / 2));
+              b.y = Math.max(20, b.y - Math.ceil(overlapY / 2));
+            }
+          }
+        }
+      }
+    }
+  }
+
+  return result;
+}
+
 export const SmartSvgaShowcaseModal: React.FC<SmartSvgaShowcaseModalProps> = ({
   isOpen,
   onClose,
@@ -238,9 +308,18 @@ export const SmartSvgaShowcaseModal: React.FC<SmartSvgaShowcaseModalProps> = ({
   const [giftItems, setGiftItems] = useState<ShowcaseGiftItem[]>([]);
   const [selectedItemId, setSelectedItemId] = useState<string | null>(null);
 
+  // Packages Management (كل باكج لوحده في صورة منفصلة)
+  const [packages, setPackages] = useState<ShowcasePackage[]>([]);
+  const [activePackageId, setActivePackageId] = useState<string>('all');
+  const [itemsPerPackageChunk, setItemsPerPackageChunk] = useState<number>(6);
+
   // Layout & Styling state
   const [activePreset, setActivePreset] = useState<SmartLayoutPreset>('vip_showcase');
   const [bgTheme, setBgTheme] = useState<string>('vip_midnight');
+
+  // Custom Uploaded Background Image (رفع خلفية مخصصة)
+  const [customBgUrl, setCustomBgUrl] = useState<string | null>(null);
+  const bgUploadRef = useRef<HTMLInputElement | null>(null);
 
   // Decorative overlays & titles matching reference photos
   const [showGoldBorders, setShowGoldBorders] = useState<boolean>(true); // Gold double frame like VIP 15
@@ -264,7 +343,7 @@ export const SmartSvgaShowcaseModal: React.FC<SmartSvgaShowcaseModalProps> = ({
   const [dragOffset, setDragOffset] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
   const [zoomLevel, setZoomLevel] = useState<number>(1);
   const [isExporting, setIsExporting] = useState<boolean>(false);
-  const [exportFormat, setExportFormat] = useState<'webp' | 'png' | 'jpeg'>('webp');
+  const [batchExportProgress, setBatchExportProgress] = useState<string | null>(null);
   const [exportMultiplier, setExportMultiplier] = useState<number>(2); // 1x = 1080p, 2x = 4K Ultra HD
   const [copiedSuccess, setCopiedSuccess] = useState<boolean>(false);
 
@@ -275,7 +354,7 @@ export const SmartSvgaShowcaseModal: React.FC<SmartSvgaShowcaseModalProps> = ({
   // Snapshot cache to prevent redundant work
   const snapshotCache = useRef<Map<string, { dataUrl: string; width: number; height: number }>>(new Map());
 
-  // Ultra-Fast Snapshot Extraction Helper (Instant from DOM or decoded memory)
+  // Extract Snapshot Helper
   const fastExtractItemSnapshot = useCallback(async (raw: any): Promise<{ dataUrl: string; width: number; height: number }> => {
     const cacheKey = raw.id || raw.name || (raw.file ? `${raw.file.name}_${raw.file.size}` : '');
     if (cacheKey && snapshotCache.current.has(cacheKey)) {
@@ -285,7 +364,7 @@ export const SmartSvgaShowcaseModal: React.FC<SmartSvgaShowcaseModalProps> = ({
     let naturalW = raw.dimensions?.width || 500;
     let naturalH = raw.dimensions?.height || 500;
 
-    // 1. Check if raw item already carries a coverBlob or pre-rendered URL
+    // 1. CoverBlob
     if (raw.coverBlob) {
       try {
         const url = URL.createObjectURL(raw.coverBlob);
@@ -296,7 +375,7 @@ export const SmartSvgaShowcaseModal: React.FC<SmartSvgaShowcaseModalProps> = ({
       } catch (e) {}
     }
 
-    // 2. INSTANT DOM CANVAS GRAB (<1ms): If already rendered in MultiSvgaViewer, grab it!
+    // 2. DOM Canvas
     if (raw.id) {
       const container = document.getElementById(`svga-container-${raw.id}`) || document.querySelector(`[data-svga-id="${raw.id}"]`);
       if (container) {
@@ -315,7 +394,7 @@ export const SmartSvgaShowcaseModal: React.FC<SmartSvgaShowcaseModalProps> = ({
       }
     }
 
-    // 3. From parsed raw.file (Images: PNG, WEBP, JPG, SVG, GIF)
+    // 3. Regular Image Files
     if (raw.file) {
       const name = raw.file.name?.toLowerCase() || '';
       if (raw.file.type?.startsWith('image/') || /\.(png|jpe?g|webp|svg|gif)$/i.test(name)) {
@@ -329,7 +408,7 @@ export const SmartSvgaShowcaseModal: React.FC<SmartSvgaShowcaseModalProps> = ({
       }
     }
 
-    // 4. FAST IN-MEMORY PROTOBUF/PAKO EXTRACTION FOR SVGA
+    // 4. Protobuf SVGA
     if (raw.file) {
       try {
         const buffer = await raw.file.arrayBuffer();
@@ -365,7 +444,7 @@ export const SmartSvgaShowcaseModal: React.FC<SmartSvgaShowcaseModalProps> = ({
       } catch (e) {}
     }
 
-    // 5. Fast bounded onCaptureFrame fallback
+    // 5. Fallback onCaptureFrame
     if (onCaptureFrame) {
       try {
         const capturePromise = onCaptureFrame(raw);
@@ -381,7 +460,6 @@ export const SmartSvgaShowcaseModal: React.FC<SmartSvgaShowcaseModalProps> = ({
       } catch (e) {}
     }
 
-    // 6. Fallback placeholder
     return {
       dataUrl: 'data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="300" height="300" viewBox="0 0 300 300"><rect width="300" height="300" rx="24" fill="%230b1022"/><text x="150" y="160" fill="%23f59e0b" font-size="20" font-weight="900" text-anchor="middle" font-family="sans-serif">VIP GIFT</text></svg>',
       width: 500,
@@ -389,7 +467,7 @@ export const SmartSvgaShowcaseModal: React.FC<SmartSvgaShowcaseModalProps> = ({
     };
   }, [onCaptureFrame]);
 
-  // STRICT ASPECT RATIO PRESERVATION: Fits an item inside a box without squishing, shrinking, or stretching
+  // Fit Item Inside Box maintaining strict aspect ratio
   const fitInsideBox = (item: ShowcaseGiftItem, boxX: number, boxY: number, boxW: number, boxH: number) => {
     const ratio = (item.originalWidth > 0 && item.originalHeight > 0) 
       ? item.originalWidth / item.originalHeight 
@@ -399,21 +477,18 @@ export const SmartSvgaShowcaseModal: React.FC<SmartSvgaShowcaseModalProps> = ({
     let actualW = boxW;
     let actualH = boxH;
     if (ratio > boxRatio) {
-      // Wider than box: match width, compute height
       actualH = Math.round(boxW / ratio);
     } else {
-      // Taller than box: match height, compute width
       actualW = Math.round(boxH * ratio);
     }
 
-    // Center cleanly inside the slot
     item.x = Math.round(boxX + (boxW - actualW) / 2);
     item.y = Math.round(boxY + (boxH - actualH) / 2);
     item.width = Math.round(actualW);
     item.height = Math.round(actualH);
   };
 
-  // Compute Layout Positions according to Preset with STRICT aspect ratio preservation
+  // SMART NON-OVERLAPPING PRESET ENGINE: Guarantees zero overlaps & exact reference styling
   const applyPresetLayout = useCallback((preset: SmartLayoutPreset, currentItems: ShowcaseGiftItem[]) => {
     if (currentItems.length === 0) return currentItems;
 
@@ -422,12 +497,9 @@ export const SmartSvgaShowcaseModal: React.FC<SmartSvgaShowcaseModalProps> = ({
     const updated = [...currentItems];
 
     if (preset === 'vip_showcase') {
-      // PRECISE RECREATION OF USER'S REFERENCE IMAGE (Screenshot_2026-10-20_143022_04a1f7b7.png):
-      // - Left Side: 1 or 2 tall vertical cards side-by-side (e.g. Wolf Gift & Royal Throne / Room Entry)
-      // - Right Side:
-      //    * Top Row: Avatar Frame (square/circle) + Royal Crest/Shield
-      //    * Middle Row: Wide Chat / Entry Banner
-      //    * Bottom Row: 3 compact badges (Card/stage, VIP text pill, mini badge)
+      // EXACT LAYOUT of Screenshot_2026-10-20_143022_04a1f7b7.png:
+      // Left side: 1 or 2 tall vertical cards
+      // Right side: Top row (Avatar Frame + Royal Crest), Middle row (Wide Banner), Bottom row (Badges)
 
       const tallItems: ShowcaseGiftItem[] = [];
       const wideItems: ShowcaseGiftItem[] = [];
@@ -449,14 +521,13 @@ export const SmartSvgaShowcaseModal: React.FC<SmartSvgaShowcaseModalProps> = ({
         }
       });
 
-      // If no item was classified as tall, assign the first item as tall hero
       if (tallItems.length === 0 && updated.length > 0) {
         tallItems.push(updated[0]);
       }
 
       const placedSet = new Set<string>();
 
-      // 1. PLACE TALL HERO GIFTS ON THE LEFT STAGE:
+      // 1. Tall items on Left:
       const numTall = Math.min(2, tallItems.length);
       for (let t = 0; t < numTall; t++) {
         const item = tallItems[t];
@@ -467,20 +538,19 @@ export const SmartSvgaShowcaseModal: React.FC<SmartSvgaShowcaseModalProps> = ({
         item.category = 'hero';
 
         if (numTall === 1) {
-          fitInsideBox(item, 70, 50, 720, 980);
+          fitInsideBox(item, 70, 60, 720, 960);
         } else {
           const slotW = 390;
-          fitInsideBox(item, 50 + t * (slotW + 30), 50, slotW, 980);
+          fitInsideBox(item, 50 + t * (slotW + 30), 60, slotW, 960);
         }
       }
 
-      // Right zone starts at x: 890, width: 980, height: 980
+      // Right zone starts at x: 900, width: 960, height: 960
       const rightX = 900;
       const rightW = 960;
-
       const rightPool = updated.filter(item => !placedSet.has(item.id));
 
-      // 2. TOP RIGHT ROW: Avatar Frame + VIP Crest/Medal (2 items side-by-side)
+      // 2. Top Right Row: 2 items (Avatar Frame + VIP Crest)
       const topRowItems = rightPool.filter(i => squareItems.includes(i)).slice(0, 2);
       if (topRowItems.length < 2) {
         for (const item of rightPool) {
@@ -497,11 +567,11 @@ export const SmartSvgaShowcaseModal: React.FC<SmartSvgaShowcaseModalProps> = ({
         item.rotation = 0;
         item.category = 'frame';
         const slotW = 450;
-        const slotH = 400;
-        fitInsideBox(item, rightX + idx * (slotW + 40), 50, slotW, slotH);
+        const slotH = 390;
+        fitInsideBox(item, rightX + idx * (slotW + 40), 60, slotW, slotH);
       });
 
-      // 3. MIDDLE RIGHT ROW: Wide Horizontal Chat/Entry Banner (1 wide item across)
+      // 3. Middle Right Row: 1 wide banner across
       const midRowItem = rightPool.find(i => wideItems.includes(i) && !placedSet.has(i.id)) 
         || rightPool.find(i => !placedSet.has(i.id));
 
@@ -511,10 +581,10 @@ export const SmartSvgaShowcaseModal: React.FC<SmartSvgaShowcaseModalProps> = ({
         midRowItem.scale = 1.0;
         midRowItem.rotation = 0;
         midRowItem.category = 'banner';
-        fitInsideBox(midRowItem, rightX + 50, 480, 860, 200);
+        fitInsideBox(midRowItem, rightX + 40, 480, 880, 190);
       }
 
-      // 4. BOTTOM RIGHT ROW: 3 Compact Badges / Chat Bubbles / Mini Tags
+      // 4. Bottom Right Row: 3 Badges / Pills
       const bottomPool = rightPool.filter(i => !placedSet.has(i.id));
       const numBottom = Math.min(3, bottomPool.length);
       const bSlotW = (rightW - (Math.max(1, numBottom) - 1) * 30) / Math.max(1, numBottom);
@@ -526,30 +596,34 @@ export const SmartSvgaShowcaseModal: React.FC<SmartSvgaShowcaseModalProps> = ({
         item.scale = 1.0;
         item.rotation = 0;
         item.category = 'badge';
-        fitInsideBox(item, rightX + b * (bSlotW + 30), 710, bSlotW, 280);
+        fitInsideBox(item, rightX + b * (bSlotW + 30), 700, bSlotW, 280);
       }
 
-      // Any remaining items distributed cleanly
+      // If any extra items still remain, place them in a safe vacant grid on the bottom without ANY overlap
       const extraItems = updated.filter(i => !placedSet.has(i.id));
-      extraItems.forEach((item, exIdx) => {
-        item.zIndex = 5;
-        item.scale = 0.9;
-        item.rotation = 0;
-        fitInsideBox(item, 80 + exIdx * 190, 820, 170, 170);
-      });
+      if (extraItems.length > 0) {
+        const exCols = Math.min(extraItems.length, 4);
+        const exW = (rightW - (exCols - 1) * 20) / exCols;
+        extraItems.forEach((item, exIdx) => {
+          item.zIndex = 6;
+          item.scale = 0.92;
+          item.rotation = 0;
+          fitInsideBox(item, rightX + (exIdx % exCols) * (exW + 20), 860, exW, 160);
+        });
+      }
 
     } else if (preset === 'gold_catalog') {
-      // PRECISE RECREATION OF VIP_GIFT_PACK_Showcase__6__0819bbf8.png:
-      // 2x3 or 3x3 Luxury Grid with balanced slots, double gold borders, asset name tags
+      // PRECISE RECREATION OF VIP 15 (VIP_GIFT_PACK_Showcase__6__0819bbf8.png):
+      // Balanced 2x3 or 3x3 Luxury Catalog Grid with generous non-overlapping padding
       const count = updated.length;
       const cols = count <= 2 ? 2 : count <= 4 ? 2 : count <= 6 ? 3 : count <= 8 ? 4 : count <= 12 ? 4 : count <= 20 ? 5 : 6;
       const rows = Math.ceil(count / cols);
       const paddingX = 80;
-      const paddingY = showVipTitle ? 130 : 80;
+      const paddingY = showVipTitle ? 140 : 80;
       const availableW = W - paddingX * 2;
       const availableH = H - paddingY - 80;
-      const gapX = count > 15 ? 16 : 28;
-      const gapY = count > 15 ? 16 : 32;
+      const gapX = count > 15 ? 18 : 32;
+      const gapY = count > 15 ? 18 : 36;
       const cellW = (availableW - (cols - 1) * gapX) / cols;
       const cellH = (availableH - (rows - 1) * gapY) / rows;
 
@@ -636,10 +710,77 @@ export const SmartSvgaShowcaseModal: React.FC<SmartSvgaShowcaseModalProps> = ({
       });
     }
 
-    return updated;
+    // RUN THE STRICT COLLISION PASS: Guarantees absolutely no overlapping items
+    return resolveCollisions(updated, W, H, 20);
   }, [showVipTitle]);
 
-  // Parallel Hydration on Open: Fast, non-blocking snapshot resolution with caching
+  // SMART PACKAGES AUTO-DETECTION: Group by folder or VIP prefix or 6-item chunks
+  const detectPackages = useCallback((rawItems: any[]): ShowcasePackage[] => {
+    if (rawItems.length === 0) return [];
+
+    // 1. Group by folderName or folderPath if present
+    const folderMap = new Map<string, string[]>();
+    rawItems.forEach(item => {
+      const folder = item.folderName || item.folderPath;
+      if (folder) {
+        if (!folderMap.has(folder)) folderMap.set(folder, []);
+        folderMap.get(folder)!.push(item.id);
+      }
+    });
+
+    if (folderMap.size > 1) {
+      return Array.from(folderMap.entries()).map(([name, ids], idx) => ({
+        id: `pkg_folder_${idx}`,
+        name: `حزمة ${name}`,
+        itemIds: ids
+      }));
+    }
+
+    // 2. Group by VIP prefix / name pattern (e.g. VIP 15, VIP 8, VIP 1)
+    const vipPatternMap = new Map<string, string[]>();
+    rawItems.forEach(item => {
+      const name = item.name || '';
+      const match = name.match(/vip\s*[-_]?\s*(\d+)/i) || name.match(/pack\s*[-_]?\s*(\d+)/i);
+      if (match) {
+        const key = `VIP ${match[1]}`;
+        if (!vipPatternMap.has(key)) vipPatternMap.set(key, []);
+        vipPatternMap.get(key)!.push(item.id);
+      }
+    });
+
+    if (vipPatternMap.size > 1) {
+      return Array.from(vipPatternMap.entries()).map(([name, ids], idx) => ({
+        id: `pkg_vip_${idx}`,
+        name: `حزمة ${name}`,
+        itemIds: ids
+      }));
+    }
+
+    // 3. If there are more than 6 items, automatically split into balanced packages of 6 items
+    if (rawItems.length > 6) {
+      const chunks: ShowcasePackage[] = [];
+      const chunkSize = itemsPerPackageChunk || 6;
+      for (let i = 0; i < rawItems.length; i += chunkSize) {
+        const slice = rawItems.slice(i, i + chunkSize);
+        chunks.push({
+          id: `pkg_chunk_${Math.floor(i / chunkSize) + 1}`,
+          name: `حزمة هدايا ${Math.floor(i / chunkSize) + 1}`,
+          itemIds: slice.map(s => s.id)
+        });
+      }
+      return chunks;
+    }
+
+    return [
+      {
+        id: 'pkg_main',
+        name: 'الحزمة الرئيسية',
+        itemIds: rawItems.map(i => i.id)
+      }
+    ];
+  }, [itemsPerPackageChunk]);
+
+  // Parallel Hydration on Open: Fast snapshot resolution & package segmentation
   useEffect(() => {
     if (!isOpen) return;
 
@@ -651,10 +792,20 @@ export const SmartSvgaShowcaseModal: React.FC<SmartSvgaShowcaseModalProps> = ({
       return;
     }
 
-    // Step 1: Initialize items immediately with their known or default aspect ratio
+    // Detect packages
+    const detectedPkgs = detectPackages(items);
+    setPackages(detectedPkgs);
+    if (detectedPkgs.length > 1) {
+      setActivePackageId(detectedPkgs[0].id);
+    } else {
+      setActivePackageId('all');
+    }
+
+    // Initialize items with their packages
     const initialItems: ShowcaseGiftItem[] = items.map((raw, i) => {
       const ow = raw.dimensions?.width || 500;
       const oh = raw.dimensions?.height || 500;
+      const pkg = detectedPkgs.find(p => p.itemIds.includes(raw.id));
       return {
         id: raw.id || `gift_${i}_${Date.now()}`,
         name: raw.name ? raw.name.replace(/\.[^/.]+$/, '') : `هدية ${i + 1}`,
@@ -669,18 +820,23 @@ export const SmartSvgaShowcaseModal: React.FC<SmartSvgaShowcaseModalProps> = ({
         rotation: 0,
         zIndex: i + 1,
         visible: true,
+        packageId: pkg?.id,
         category: i === 0 ? 'hero' : 'normal'
       };
     });
 
-    const positioned = applyPresetLayout(activePreset, initialItems);
+    const activeList = (detectedPkgs.length > 1 && detectedPkgs[0].id)
+      ? initialItems.filter(i => detectedPkgs[0].itemIds.includes(i.id))
+      : initialItems;
+
+    const positioned = applyPresetLayout(activePreset, activeList);
     setGiftItems(positioned);
     if (positioned.length > 0) {
       setSelectedItemId(positioned[0].id);
     }
     setLoadingProgress(15);
 
-    // Step 2: Extract snapshots in high-concurrency batches of 8 in parallel
+    // High concurrency snapshot extraction
     const processInParallel = async () => {
       const BATCH_SIZE = 8;
       let completedCount = 0;
@@ -701,7 +857,6 @@ export const SmartSvgaShowcaseModal: React.FC<SmartSvgaShowcaseModalProps> = ({
         completedCount += currentBatch.length;
         setLoadingProgress(Math.min(100, Math.round((completedCount / total) * 100)));
 
-        // Live update images with exact intrinsic dimensions
         setGiftItems((prev) => {
           const updatedList = prev.map((item) => {
             const match = results.find((r) => r.id === item.id);
@@ -722,7 +877,81 @@ export const SmartSvgaShowcaseModal: React.FC<SmartSvgaShowcaseModalProps> = ({
     return () => {
       isMounted = false;
     };
-  }, [isOpen, items, fastExtractItemSnapshot, applyPresetLayout, activePreset]);
+  }, [isOpen, items, fastExtractItemSnapshot, applyPresetLayout, activePreset, detectPackages]);
+
+  // Switch Active Package Tab
+  const handleSelectPackage = (pkgId: string) => {
+    setActivePackageId(pkgId);
+    let targetItems: any[] = [];
+    if (pkgId === 'all') {
+      targetItems = items;
+    } else {
+      const pkg = packages.find(p => p.id === pkgId);
+      targetItems = pkg ? items.filter(i => pkg.itemIds.includes(i.id)) : items;
+    }
+
+    const remapped = targetItems.map((raw, idx) => {
+      const cached = snapshotCache.current.get(raw.id) || snapshotCache.current.get(raw.name);
+      return {
+        id: raw.id,
+        name: raw.name ? raw.name.replace(/\.[^/.]+$/, '') : `هدية ${idx + 1}`,
+        dataUrl: cached?.dataUrl || '',
+        originalWidth: cached?.width || raw.dimensions?.width || 500,
+        originalHeight: cached?.height || raw.dimensions?.height || 500,
+        x: 0,
+        y: 0,
+        width: 320,
+        height: 320,
+        scale: 1.0,
+        rotation: 0,
+        zIndex: idx + 1,
+        visible: true,
+        packageId: pkgId,
+        category: idx === 0 ? 'hero' : 'normal'
+      } as ShowcaseGiftItem;
+    });
+
+    // Update VIP Title with package name
+    if (pkgId !== 'all') {
+      const pkg = packages.find(p => p.id === pkgId);
+      if (pkg) setVipMainTitle(pkg.name.toUpperCase());
+    }
+
+    setGiftItems(applyPresetLayout(activePreset, remapped));
+  };
+
+  // Re-chunk items into packages by count
+  const handleRechunkPackages = (chunkSize: number) => {
+    setItemsPerPackageChunk(chunkSize);
+    const newPkgs: ShowcasePackage[] = [];
+    for (let i = 0; i < items.length; i += chunkSize) {
+      const slice = items.slice(i, i + chunkSize);
+      newPkgs.push({
+        id: `pkg_chunk_${Math.floor(i / chunkSize) + 1}`,
+        name: `حزمة ${Math.floor(i / chunkSize) + 1} (${slice.length} هدايا)`,
+        itemIds: slice.map(s => s.id)
+      });
+    }
+    setPackages(newPkgs);
+    if (newPkgs.length > 0) {
+      handleSelectPackage(newPkgs[0].id);
+    }
+  };
+
+  // Upload Custom Background Image Handler
+  const handleCustomBgUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (!e.target.files || e.target.files.length === 0) return;
+    const file = e.target.files[0];
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      if (ev.target?.result) {
+        setCustomBgUrl(ev.target.result as string);
+        setBgTheme('custom');
+      }
+    };
+    reader.readAsDataURL(file);
+    e.target.value = '';
+  };
 
   // Switch Preset Handler
   const handleSelectPreset = (preset: SmartLayoutPreset) => {
@@ -735,7 +964,7 @@ export const SmartSvgaShowcaseModal: React.FC<SmartSvgaShowcaseModalProps> = ({
     setGiftItems(prev => applyPresetLayout(preset, prev));
   };
 
-  // Re-order or Bring To Front
+  // Layer Order
   const bringToFront = (id: string) => {
     setGiftItems(prev => {
       const maxZ = Math.max(...prev.map(i => i.zIndex), 0);
@@ -750,19 +979,17 @@ export const SmartSvgaShowcaseModal: React.FC<SmartSvgaShowcaseModalProps> = ({
     });
   };
 
-  // Update selected item attribute
   const updateSelectedItem = (changes: Partial<ShowcaseGiftItem>) => {
     if (!selectedItemId) return;
     setGiftItems(prev => prev.map(item => item.id === selectedItemId ? { ...item, ...changes } : item));
   };
 
-  // Delete selected item from collage
   const handleDeleteItem = (id: string) => {
     setGiftItems(prev => prev.filter(i => i.id !== id));
     if (selectedItemId === id) setSelectedItemId(null);
   };
 
-  // Dragging support inside the interactive workspace
+  // Dragging support inside workspace
   const handleItemMouseDown = (e: React.MouseEvent, id: string) => {
     e.stopPropagation();
     setSelectedItemId(id);
@@ -813,8 +1040,13 @@ export const SmartSvgaShowcaseModal: React.FC<SmartSvgaShowcaseModalProps> = ({
     setIsDragging(false);
   };
 
-  // RENDER CANVAS TO BLOB: Pure WYSIWYG matching DOM exactly
-  const renderCanvasToBlob = async (format: 'webp' | 'png' | 'jpeg', scaleMultiplier: number = 2): Promise<Blob> => {
+  // CORE CANVAS RENDERER: Renders any given item set onto canvas with custom background & zero squishing
+  const renderItemSetToBlob = async (
+    targetItems: ShowcaseGiftItem[], 
+    format: 'webp' | 'png' | 'jpeg', 
+    scaleMultiplier: number = 2,
+    customTitle?: string
+  ): Promise<Blob> => {
     const W = CANVAS_WIDTH * scaleMultiplier;
     const H = CANVAS_HEIGHT * scaleMultiplier;
 
@@ -823,8 +1055,20 @@ export const SmartSvgaShowcaseModal: React.FC<SmartSvgaShowcaseModalProps> = ({
     canvas.height = H;
     const ctx = canvas.getContext('2d')!;
 
-    // 1. Draw Background Theme
-    if (bgTheme === 'transparent') {
+    // 1. Draw Background: Custom Uploaded Background OR Preset
+    if (bgTheme === 'custom' && customBgUrl) {
+      const bgImg = new Image();
+      bgImg.crossOrigin = 'anonymous';
+      bgImg.src = customBgUrl;
+      await new Promise<void>((resolve) => {
+        if (bgImg.complete) resolve();
+        else {
+          bgImg.onload = () => resolve();
+          bgImg.onerror = () => resolve();
+        }
+      });
+      ctx.drawImage(bgImg, 0, 0, W, H);
+    } else if (bgTheme === 'transparent') {
       ctx.clearRect(0, 0, W, H);
     } else if (bgTheme === 'vip_midnight') {
       const grad = ctx.createLinearGradient(0, 0, W, H);
@@ -834,7 +1078,6 @@ export const SmartSvgaShowcaseModal: React.FC<SmartSvgaShowcaseModalProps> = ({
       ctx.fillStyle = grad;
       ctx.fillRect(0, 0, W, H);
 
-      // Celestial radial blue glow
       const radial = ctx.createRadialGradient(W * 0.38, H * 0.45, 50, W * 0.38, H * 0.45, W * 0.65);
       radial.addColorStop(0, 'rgba(59, 130, 246, 0.16)');
       radial.addColorStop(0.7, 'rgba(14, 165, 233, 0.05)');
@@ -842,7 +1085,6 @@ export const SmartSvgaShowcaseModal: React.FC<SmartSvgaShowcaseModalProps> = ({
       ctx.fillStyle = radial;
       ctx.fillRect(0, 0, W, H);
 
-      // Ambient stars
       ctx.fillStyle = 'rgba(255, 255, 255, 0.6)';
       const starCoords = [[0.12, 0.22], [0.42, 0.16], [0.78, 0.22], [0.88, 0.45], [0.22, 0.68], [0.65, 0.88]];
       for (const [sx, sy] of starCoords) {
@@ -876,33 +1118,30 @@ export const SmartSvgaShowcaseModal: React.FC<SmartSvgaShowcaseModalProps> = ({
       ctx.fillRect(0, 0, W, H);
     }
 
-    // 2. Gold Luxury Double Borders matching VIP 15 reference photo
+    // 2. Gold Luxury Double Borders matching VIP 15
     if (showGoldBorders && bgTheme !== 'transparent') {
       ctx.save();
-      // Outer border
       ctx.strokeStyle = '#d4af37';
       ctx.lineWidth = 3 * scaleMultiplier;
       ctx.strokeRect(18 * scaleMultiplier, 18 * scaleMultiplier, W - 36 * scaleMultiplier, H - 36 * scaleMultiplier);
 
-      // Inner thin border
       ctx.strokeStyle = 'rgba(212, 175, 55, 0.45)';
       ctx.lineWidth = 1.5 * scaleMultiplier;
       ctx.strokeRect(26 * scaleMultiplier, 26 * scaleMultiplier, W - 52 * scaleMultiplier, H - 52 * scaleMultiplier);
       ctx.restore();
     }
 
-    // 3. VIP Main Title Header matching VIP 15 reference photo
-    if (showVipTitle && vipMainTitle && bgTheme !== 'transparent') {
+    // 3. VIP Title Header
+    const titleToDraw = customTitle || vipMainTitle;
+    if (showVipTitle && titleToDraw && bgTheme !== 'transparent') {
       ctx.save();
       ctx.textAlign = 'right';
 
-      // Title Shadow
       ctx.shadowColor = 'rgba(0, 0, 0, 0.8)';
       ctx.shadowBlur = 12 * scaleMultiplier;
       ctx.shadowOffsetX = 2 * scaleMultiplier;
       ctx.shadowOffsetY = 4 * scaleMultiplier;
 
-      // Gold Gradient Title Text
       const titleGrad = ctx.createLinearGradient(W - 400 * scaleMultiplier, 50 * scaleMultiplier, W - 50 * scaleMultiplier, 90 * scaleMultiplier);
       titleGrad.addColorStop(0, '#fef08a');
       titleGrad.addColorStop(0.5, '#facc15');
@@ -910,7 +1149,7 @@ export const SmartSvgaShowcaseModal: React.FC<SmartSvgaShowcaseModalProps> = ({
 
       ctx.fillStyle = titleGrad;
       ctx.font = `900 ${36 * scaleMultiplier}px 'Tajawal', sans-serif`;
-      ctx.fillText(vipMainTitle, W - 50 * scaleMultiplier, 72 * scaleMultiplier);
+      ctx.fillText(titleToDraw, W - 50 * scaleMultiplier, 72 * scaleMultiplier);
 
       if (vipSubTitle) {
         ctx.shadowColor = 'transparent';
@@ -921,7 +1160,7 @@ export const SmartSvgaShowcaseModal: React.FC<SmartSvgaShowcaseModalProps> = ({
       ctx.restore();
     }
 
-    // 4. Draw Top Left Pill Badge: "📦 PACK · 42"
+    // 4. Pill Badge & Heart Icon
     if (showPackBadge && packBadgeText) {
       ctx.save();
       const badgeX = 50 * scaleMultiplier;
@@ -950,7 +1189,6 @@ export const SmartSvgaShowcaseModal: React.FC<SmartSvgaShowcaseModalProps> = ({
       ctx.restore();
     }
 
-    // 5. Draw Top Right Heart Icon
     if (showHeartIcon) {
       ctx.save();
       const hX = W - 70 * scaleMultiplier;
@@ -973,8 +1211,8 @@ export const SmartSvgaShowcaseModal: React.FC<SmartSvgaShowcaseModalProps> = ({
       ctx.restore();
     }
 
-    // 6. Sort items by zIndex and render with STRICT object-contain preservation
-    const sortedItems = [...giftItems].filter(i => i.visible).sort((a, b) => a.zIndex - b.zIndex);
+    // 5. Render Items with Strict Object-Contain
+    const sortedItems = [...targetItems].filter(i => i.visible).sort((a, b) => a.zIndex - b.zIndex);
 
     for (const item of sortedItems) {
       if (!item.dataUrl) continue;
@@ -991,13 +1229,11 @@ export const SmartSvgaShowcaseModal: React.FC<SmartSvgaShowcaseModalProps> = ({
         }
       });
 
-      // Bounding box on the target canvas
       const cx = (item.x + item.width / 2) * scaleMultiplier;
       const cy = (item.y + item.height / 2) * scaleMultiplier;
       const bw = item.width * item.scale * scaleMultiplier;
       const bh = item.height * item.scale * scaleMultiplier;
 
-      // Intrinsic aspect ratio contain
       const natW = img.naturalWidth || item.originalWidth || bw;
       const natH = img.naturalHeight || item.originalHeight || bh;
       const nr = natW / natH;
@@ -1006,10 +1242,8 @@ export const SmartSvgaShowcaseModal: React.FC<SmartSvgaShowcaseModalProps> = ({
       let dw = bw;
       let dh = bh;
       if (nr > br) {
-        // Wider: match width
         dh = Math.round(bw / nr);
       } else {
-        // Taller: match height
         dw = Math.round(bh * nr);
       }
 
@@ -1026,7 +1260,6 @@ export const SmartSvgaShowcaseModal: React.FC<SmartSvgaShowcaseModalProps> = ({
 
       ctx.drawImage(img, -dw / 2, -dh / 2, dw, dh);
 
-      // Label tag pill matching VIP 15 reference photo
       if (showItemLabels && item.name) {
         ctx.shadowColor = 'transparent';
         const labelY = dh / 2 + 18 * scaleMultiplier;
@@ -1054,7 +1287,7 @@ export const SmartSvgaShowcaseModal: React.FC<SmartSvgaShowcaseModalProps> = ({
       ctx.restore();
     }
 
-    // 7. Protective Watermark Overlay if enabled
+    // 6. Watermark
     if (watermarkEnabled && watermarkText) {
       ctx.save();
       ctx.font = `bold ${24 * scaleMultiplier}px sans-serif`;
@@ -1070,7 +1303,6 @@ export const SmartSvgaShowcaseModal: React.FC<SmartSvgaShowcaseModalProps> = ({
       ctx.restore();
     }
 
-    // Determine output MIME type
     const mimeType = format === 'webp' ? 'image/webp' : format === 'jpeg' ? 'image/jpeg' : 'image/png';
     const quality = format === 'png' ? 1.0 : 0.96;
 
@@ -1081,17 +1313,18 @@ export const SmartSvgaShowcaseModal: React.FC<SmartSvgaShowcaseModalProps> = ({
     });
   };
 
-  // Export Download Trigger
-  const handleDownload = async (format: 'webp' | 'png' | 'jpeg') => {
+  // Export Active Package to file
+  const handleDownloadActivePackage = async (format: 'webp' | 'png' | 'jpeg') => {
     setIsExporting(true);
     try {
-      const blob = await renderCanvasToBlob(format, exportMultiplier);
+      const blob = await renderItemSetToBlob(giftItems, format, exportMultiplier);
       const url = URL.createObjectURL(blob);
       const link = document.createElement('a');
       link.href = url;
       const ext = format === 'jpeg' ? 'jpg' : format;
-      const filename = `VIP_GIFT_PACK_Showcase_${giftItems.length}_${Date.now()}.${ext}`;
-      link.download = filename;
+      const currentPkgName = packages.find(p => p.id === activePackageId)?.name || 'VIP_Showcase';
+      const cleanPkgName = currentPkgName.replace(/[^a-zA-Z0-9_\u0600-\u06FF]/g, '_');
+      link.download = `${cleanPkgName}_${Date.now()}.${ext}`;
       document.body.appendChild(link);
       link.click();
       document.body.removeChild(link);
@@ -1104,11 +1337,81 @@ export const SmartSvgaShowcaseModal: React.FC<SmartSvgaShowcaseModalProps> = ({
     }
   };
 
+  // MASTER BATCH EXPORT: Exports each package in its own separate image in a ZIP!
+  const handleExportAllPackagesZip = async (format: 'webp' | 'png' | 'jpeg' = 'png') => {
+    if (packages.length === 0) return;
+    setIsExporting(true);
+    setBatchExportProgress("بدء تصدير جميع الحزم...");
+
+    try {
+      const zip = new JSZip();
+      const ext = format === 'jpeg' ? 'jpg' : format;
+
+      for (let idx = 0; idx < packages.length; idx++) {
+        const pkg = packages[idx];
+        setBatchExportProgress(`جاري تصدير ${pkg.name} (${idx + 1}/${packages.length})...`);
+
+        // Prepare items for this package
+        const pkgRaw = items.filter(i => pkg.itemIds.includes(i.id));
+        const pkgItems = pkgRaw.map((raw, itemIdx) => {
+          const cached = snapshotCache.current.get(raw.id) || snapshotCache.current.get(raw.name);
+          return {
+            id: raw.id,
+            name: raw.name ? raw.name.replace(/\.[^/.]+$/, '') : `هدية ${itemIdx + 1}`,
+            dataUrl: cached?.dataUrl || '',
+            originalWidth: cached?.width || raw.dimensions?.width || 500,
+            originalHeight: cached?.height || raw.dimensions?.height || 500,
+            x: 0,
+            y: 0,
+            width: 320,
+            height: 320,
+            scale: 1.0,
+            rotation: 0,
+            zIndex: itemIdx + 1,
+            visible: true,
+            packageId: pkg.id,
+            category: itemIdx === 0 ? 'hero' : 'normal'
+          } as ShowcaseGiftItem;
+        });
+
+        // Apply non-overlapping layout
+        const laidOut = applyPresetLayout(activePreset, pkgItems);
+
+        // Render to blob
+        const blob = await renderItemSetToBlob(laidOut, format, exportMultiplier, pkg.name.toUpperCase());
+        const arrayBuf = await blob.arrayBuffer();
+
+        const cleanName = pkg.name.replace(/[^a-zA-Z0-9_\u0600-\u06FF]/g, '_');
+        zip.file(`${idx + 1}_${cleanName}.${ext}`, arrayBuf);
+      }
+
+      setBatchExportProgress("جاري إنشاء ملف الـ ZIP المضغوط...");
+      const zipBlob = await zip.generateAsync({ type: 'blob', compression: 'DEFLATE', compressionOptions: { level: 6 } });
+
+      const url = URL.createObjectURL(zipBlob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `جميع_حزم_الهدايا_المجمعة_VIP_${Date.now()}.zip`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(url);
+
+      alert(`✅ تم تصدير جميع الحزم بنجاح (${packages.length} صور منفصلة داخل ملف ZIP)!`);
+    } catch (err: any) {
+      console.error("Batch export error:", err);
+      alert("حدث خطأ أثناء تصدير الحزم: " + (err.message || ''));
+    } finally {
+      setIsExporting(false);
+      setBatchExportProgress(null);
+    }
+  };
+
   // Copy to Clipboard Handler
   const handleCopyToClipboard = async () => {
     setIsExporting(true);
     try {
-      const blob = await renderCanvasToBlob('png', 2);
+      const blob = await renderItemSetToBlob(giftItems, 'png', 2);
       await navigator.clipboard.write([
         new ClipboardItem({ 'image/png': blob })
       ]);
@@ -1122,7 +1425,7 @@ export const SmartSvgaShowcaseModal: React.FC<SmartSvgaShowcaseModalProps> = ({
     }
   };
 
-  // Upload Additional Assets directly from the modal
+  // Upload Additional Assets
   const handleAddMoreFiles = async (e: React.ChangeEvent<HTMLInputElement>) => {
     if (!e.target.files) return;
     const files = Array.from(e.target.files);
@@ -1145,6 +1448,7 @@ export const SmartSvgaShowcaseModal: React.FC<SmartSvgaShowcaseModalProps> = ({
         rotation: 0,
         zIndex: giftItems.length + idx + 1,
         visible: true,
+        packageId: activePackageId !== 'all' ? activePackageId : undefined,
         category: 'normal'
       });
     }
@@ -1176,9 +1480,18 @@ export const SmartSvgaShowcaseModal: React.FC<SmartSvgaShowcaseModalProps> = ({
             onChange={handleAddMoreFiles}
           />
 
+          {/* Hidden File Input for Custom Background Image */}
+          <input
+            ref={bgUploadRef}
+            type="file"
+            accept="image/*"
+            className="hidden"
+            onChange={handleCustomBgUpload}
+          />
+
           {/* TOP MODAL HEADER */}
-          <div className="px-5 py-3.5 bg-gradient-to-r from-slate-950 via-[#0e1628] to-slate-950 border-b border-white/10 flex items-center justify-between gap-4 shrink-0">
-            {/* Left Action Buttons: Formats, Upload, Copy, Close */}
+          <div className="px-5 py-3 bg-gradient-to-r from-slate-950 via-[#0e1628] to-slate-950 border-b border-white/10 flex items-center justify-between gap-4 shrink-0">
+            {/* Left Action Buttons */}
             <div className="flex flex-wrap items-center gap-2">
               <button
                 onClick={onClose}
@@ -1190,15 +1503,41 @@ export const SmartSvgaShowcaseModal: React.FC<SmartSvgaShowcaseModalProps> = ({
 
               <div className="h-6 w-px bg-white/10 mx-0.5" />
 
-              {/* Upload Assets Button (الزر المخصص لرفع الصور والهدايا معاً) */}
+              {/* Upload Assets Button */}
               <button
                 onClick={() => uploadInputRef.current?.click()}
                 className="px-3.5 py-1.5 rounded-xl bg-indigo-600/30 hover:bg-indigo-600/50 text-indigo-200 border border-indigo-500/40 font-bold text-xs flex items-center gap-2 transition-all active:scale-95 cursor-pointer shadow-md shadow-indigo-600/15"
-                title="رفع ملفات هدايا وصور إضافية وتجميعها في نفس اللوحة (SVGA, PNG, WebP, GIF, MP4)"
+                title="رفع ملفات هدايا وصور إضافية وتجميعها في نفس اللوحة"
               >
                 <Upload className="w-4 h-4 text-indigo-300" />
                 <span>رفع صور وهدايا للوحة</span>
               </button>
+
+              {/* Upload Custom Background Button (رفع خلفية مخصصة) */}
+              <button
+                onClick={() => bgUploadRef.current?.click()}
+                className="px-3.5 py-1.5 rounded-xl bg-purple-600/30 hover:bg-purple-600/50 text-purple-200 border border-purple-500/40 font-bold text-xs flex items-center gap-2 transition-all active:scale-95 cursor-pointer shadow-md shadow-purple-600/15"
+                title="رفع صورة من جهازك لوضعها كخلفية فاخرة خلف الهدايا"
+              >
+                <ImageIcon className="w-4 h-4 text-purple-300" />
+                <span>رفع خلفية مخصصة</span>
+              </button>
+
+              {/* Export All Packages in ZIP Button */}
+              {packages.length > 1 && (
+                <button
+                  onClick={() => handleExportAllPackagesZip('png')}
+                  disabled={isExporting}
+                  className="px-3.5 py-1.5 rounded-xl bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white font-black text-xs shadow-lg shadow-indigo-600/25 border border-indigo-400/50 flex items-center gap-1.5 transition-all active:scale-95 disabled:opacity-50"
+                  title="تصدير كل حزمة في صورة منفصلة وتحميلها جميعاً في ملف ZIP مضغوط"
+                >
+                  <FolderArchive className="w-4 h-4 text-amber-300" />
+                  <span>تصدير كل الحزم (ZIP)</span>
+                  <span className="px-1.5 py-0.2 rounded bg-black/40 text-[10px] text-amber-300 font-bold">
+                    {packages.length} صور
+                  </span>
+                </button>
+              )}
 
               {/* Copy to Clipboard */}
               <button
@@ -1238,51 +1577,51 @@ export const SmartSvgaShowcaseModal: React.FC<SmartSvgaShowcaseModalProps> = ({
                 </button>
               </div>
 
-              {/* EXPORT WEBP BUTTON (سريع وخفيف) */}
+              {/* EXPORT WEBP BUTTON */}
               <button
-                onClick={() => handleDownload('webp')}
+                onClick={() => handleDownloadActivePackage('webp')}
                 disabled={isExporting || giftItems.length === 0}
                 className="px-3.5 py-1.5 rounded-xl bg-gradient-to-r from-emerald-500 via-teal-400 to-emerald-500 hover:from-emerald-400 hover:to-teal-300 text-slate-950 font-black text-xs shadow-lg shadow-emerald-500/20 flex items-center gap-1.5 transition-all active:scale-95 disabled:opacity-50 border border-emerald-200"
-                title="تصدير بصيغة WebP خفيفة جداً وسريعة وبأعلى دقة نقاء"
+                title="تصدير الحزمة المعروضة بصيغة WebP خفيفة وسريعة"
               >
                 <Download className="w-4 h-4 stroke-[2.5]" />
-                <span>تصدير WebP</span>
+                <span>WebP</span>
               </button>
 
               {/* EXPORT PNG BUTTON */}
               <button
-                onClick={() => handleDownload('png')}
+                onClick={() => handleDownloadActivePackage('png')}
                 disabled={isExporting || giftItems.length === 0}
                 className="px-3.5 py-1.5 rounded-xl bg-gradient-to-r from-amber-500 via-yellow-400 to-amber-500 hover:from-amber-400 hover:to-yellow-300 text-slate-950 font-black text-xs shadow-lg shadow-amber-500/20 flex items-center gap-1.5 transition-all active:scale-95 disabled:opacity-50 border border-yellow-200"
-                title="تصدير وتحميل اللوحة كصورة PNG فائقة الجودة بدقة 4K"
+                title="تصدير وتحميل اللوحة الحالية كصورة PNG فائقة الجودة بدقة 4K"
               >
                 <Download className="w-4 h-4 stroke-[2.5]" />
-                <span>تصدير PNG</span>
+                <span>PNG (4K)</span>
               </button>
 
               {/* EXPORT JPG BUTTON */}
               <button
-                onClick={() => handleDownload('jpeg')}
+                onClick={() => handleDownloadActivePackage('jpeg')}
                 disabled={isExporting || giftItems.length === 0}
                 className="px-3 py-1.5 rounded-xl bg-white/10 hover:bg-white/20 text-slate-200 font-bold text-xs flex items-center gap-1.5 transition-all active:scale-95 disabled:opacity-50"
-                title="تصدير كصورة JPG عالية الوضوح"
+                title="تصدير كصورة JPG"
               >
                 <Download className="w-3.5 h-3.5" />
                 <span>JPG</span>
               </button>
             </div>
 
-            {/* Center/Right: Modal Title & Badge */}
+            {/* Title & Badge */}
             <div className="flex items-center gap-3">
               <div className="flex flex-col text-right">
                 <div className="flex items-center gap-2 justify-end">
                   <span className="px-2 py-0.5 rounded-md bg-amber-400/20 text-amber-300 border border-amber-400/30 text-[10px] font-black">
                     لوحة حزمة الهدايا • VIP Showcase
                   </span>
-                  <h3 className="text-base font-black text-white">استوديو تجميع الهدايا في صورة واحدة</h3>
+                  <h3 className="text-base font-black text-white">استوديو تجميع الهدايا في صور مستقلة</h3>
                 </div>
                 <p className="text-xs text-slate-400">
-                  تطابق 100% مع شكل التصدير وبدون أي تقليص أو تشويه للأبعاد الأصلية
+                  فصل كل حزمة في صورة منفصلة، منع تداخل الصور نهائياً، ودعم رفع خلفيات مخصصة
                 </p>
               </div>
 
@@ -1292,7 +1631,80 @@ export const SmartSvgaShowcaseModal: React.FC<SmartSvgaShowcaseModalProps> = ({
             </div>
           </div>
 
-          {/* MAIN MODAL BODY: Workspace (Left/Center) + Smart Control Sidebar (Right) */}
+          {/* PACKAGES SELECTION TAB BAR (شريط الحزم المنفصلة) */}
+          {packages.length > 0 && (
+            <div className="px-5 py-2 bg-slate-900/90 border-b border-white/10 flex items-center justify-between gap-3 overflow-x-auto shrink-0 select-none">
+              <div className="flex items-center gap-2">
+                <span className="text-xs font-bold text-amber-400 flex items-center gap-1.5 shrink-0">
+                  <Package className="w-4 h-4" />
+                  <span>الحزم (كل حزمة في صورة):</span>
+                </span>
+
+                <div className="flex items-center gap-1.5">
+                  {packages.map((pkg) => {
+                    const isActive = activePackageId === pkg.id;
+                    return (
+                      <button
+                        key={pkg.id}
+                        onClick={() => handleSelectPackage(pkg.id)}
+                        className={`px-3 py-1 rounded-xl text-xs font-black transition-all flex items-center gap-1.5 shrink-0 ${
+                          isActive
+                            ? 'bg-gradient-to-r from-amber-500 to-yellow-400 text-slate-950 shadow-md shadow-amber-500/20 ring-1 ring-yellow-200'
+                            : 'bg-white/5 hover:bg-white/10 text-slate-300 border border-white/10'
+                        }`}
+                      >
+                        <span>{pkg.name}</span>
+                        <span className={`px-1.5 py-0.2 rounded-md text-[10px] font-bold ${
+                          isActive ? 'bg-black text-amber-300' : 'bg-white/10 text-slate-400'
+                        }`}>
+                          {pkg.itemIds.length}
+                        </span>
+                      </button>
+                    );
+                  })}
+
+                  <button
+                    onClick={() => handleSelectPackage('all')}
+                    className={`px-3 py-1 rounded-xl text-xs font-black transition-all flex items-center gap-1.5 shrink-0 ${
+                      activePackageId === 'all'
+                        ? 'bg-gradient-to-r from-indigo-500 to-purple-500 text-white shadow-md shadow-indigo-500/20'
+                        : 'bg-white/5 hover:bg-white/10 text-slate-300 border border-white/10'
+                    }`}
+                  >
+                    <span>عرض الكل معاً</span>
+                    <span className="px-1.5 py-0.2 rounded-md text-[10px] bg-white/10 text-slate-400 font-bold">
+                      {items.length}
+                    </span>
+                  </button>
+                </div>
+              </div>
+
+              {/* Fast Package Auto-Chunk Splitter */}
+              <div className="flex items-center gap-2 shrink-0">
+                <span className="text-[11px] text-slate-400 font-bold">تقسيم تلقائي:</span>
+                <button
+                  onClick={() => handleRechunkPackages(6)}
+                  className={`px-2 py-0.5 rounded-lg text-[10px] font-bold border transition-colors ${
+                    itemsPerPackageChunk === 6 ? 'bg-amber-400/20 border-amber-400 text-amber-300' : 'bg-white/5 border-white/10 text-slate-400'
+                  }`}
+                  title="تقسيم كل 6 هدايا في حزمة مستقلة (مطابق للتنسيق الفاخر 2×3)"
+                >
+                  كل 6 هدايا
+                </button>
+                <button
+                  onClick={() => handleRechunkPackages(8)}
+                  className={`px-2 py-0.5 rounded-lg text-[10px] font-bold border transition-colors ${
+                    itemsPerPackageChunk === 8 ? 'bg-amber-400/20 border-amber-400 text-amber-300' : 'bg-white/5 border-white/10 text-slate-400'
+                  }`}
+                  title="تقسيم كل 8 هدايا في حزمة مستقلة"
+                >
+                  كل 8 هدايا
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* MAIN MODAL BODY: Workspace + Sidebar */}
           <div className="flex-1 flex flex-col lg:flex-row overflow-hidden relative">
             
             {/* WORKSPACE CANVAS AREA */}
@@ -1301,7 +1713,7 @@ export const SmartSvgaShowcaseModal: React.FC<SmartSvgaShowcaseModalProps> = ({
               onMouseMove={handleWorkspaceMouseMove}
               onMouseUp={handleWorkspaceMouseUp}
             >
-              {/* Floating Canvas Top Toolbar (Zoom, Reset, Fast Progress) */}
+              {/* Floating Canvas Top Toolbar */}
               <div className="absolute top-4 left-4 z-20 flex items-center gap-2 bg-slate-900/90 border border-white/10 px-3 py-1.5 rounded-2xl backdrop-blur-md shadow-xl">
                 <button
                   onClick={() => setZoomLevel(prev => Math.min(1.8, prev + 0.1))}
@@ -1330,17 +1742,17 @@ export const SmartSvgaShowcaseModal: React.FC<SmartSvgaShowcaseModalProps> = ({
 
                 <div className="h-4 w-px bg-white/10 mx-1" />
 
-                {/* Reset Positions Button */}
+                {/* Reset Positions */}
                 <button
                   onClick={() => setGiftItems(prev => applyPresetLayout(activePreset, prev))}
                   className="px-2 py-1 rounded-lg bg-white/5 hover:bg-white/10 text-slate-300 hover:text-white text-[11px] font-bold flex items-center gap-1.5 transition-colors"
-                  title="إعادة ترتيب العناصر تلقائياً بحسب القالب المختار"
+                  title="إعادة ترتيب العناصر تلقائياً مع منع التداخل"
                 >
                   <RefreshCw className="w-3.5 h-3.5 text-amber-400" />
-                  <span>إعادة الترتيب التلقائي</span>
+                  <span>ترتيب تلقائي ذكي</span>
                 </button>
 
-                {/* Upload More inside Toolbar */}
+                {/* Add files inside Toolbar */}
                 <button
                   onClick={() => uploadInputRef.current?.click()}
                   className="px-2 py-1 rounded-lg bg-indigo-500/20 hover:bg-indigo-500/30 text-indigo-300 text-[11px] font-bold flex items-center gap-1 transition-colors"
@@ -1349,11 +1761,11 @@ export const SmartSvgaShowcaseModal: React.FC<SmartSvgaShowcaseModalProps> = ({
                   <span>إضافة ملفات</span>
                 </button>
 
-                {/* Non-blocking progress indicator badge */}
-                {loadingProgress < 100 && (
-                  <div className="flex items-center gap-1.5 px-2.5 py-0.5 rounded-lg bg-amber-500/20 text-amber-300 border border-amber-500/30 text-[10px] font-black animate-pulse">
-                    <Sparkles className="w-3 h-3 text-amber-400" />
-                    <span>تحميل سريع ({loadingProgress}%)</span>
+                {/* Batch Export Progress Toast */}
+                {batchExportProgress && (
+                  <div className="flex items-center gap-1.5 px-3 py-1 rounded-lg bg-indigo-600 text-white text-[11px] font-black animate-pulse shadow-lg">
+                    <Sparkles className="w-3.5 h-3.5 text-amber-300" />
+                    <span>{batchExportProgress}</span>
                   </div>
                 )}
               </div>
@@ -1364,9 +1776,9 @@ export const SmartSvgaShowcaseModal: React.FC<SmartSvgaShowcaseModalProps> = ({
                   <div className="w-12 h-12 rounded-2xl bg-white/5 flex items-center justify-center text-slate-400">
                     <Upload className="w-6 h-6" />
                   </div>
-                  <p className="text-sm font-bold text-white">لم يتم تحميل ملفات بعد</p>
+                  <p className="text-sm font-bold text-white">لم يتم تحميل ملفات في هذه الحزمة</p>
                   <p className="text-xs text-slate-400">
-                    ارفع ملفات SVGA أو صور في نظام العرض أو اضغط على الزر أدناه لإضافتها فوراً
+                    ارفع ملفات هدايا وصور إضافية أو اختر حزمة أخرى من الشريط بالأعلى
                   </p>
                   <button 
                     onClick={() => uploadInputRef.current?.click()}
@@ -1379,7 +1791,9 @@ export const SmartSvgaShowcaseModal: React.FC<SmartSvgaShowcaseModalProps> = ({
               ) : (
                 <div 
                   ref={workspaceRef}
-                  className={`relative rounded-3xl shadow-2xl transition-all overflow-hidden border ${BG_THEMES.find(t => t.id === bgTheme)?.border || 'border-white/10'}`}
+                  className={`relative rounded-3xl shadow-2xl transition-all overflow-hidden border ${
+                    bgTheme === 'custom' ? 'border-purple-500/40' : (BG_THEMES.find(t => t.id === bgTheme)?.border || 'border-white/10')
+                  }`}
                   style={{
                     width: '100%',
                     maxWidth: `${1000 * zoomLevel}px`,
@@ -1389,14 +1803,22 @@ export const SmartSvgaShowcaseModal: React.FC<SmartSvgaShowcaseModalProps> = ({
                   }}
                   onClick={() => setSelectedItemId(null)}
                 >
-                  {/* Background Theme */}
-                  <div className={`absolute inset-0 ${BG_THEMES.find(t => t.id === bgTheme)?.class || 'bg-[#060b17]'}`}>
-                    {bgTheme === 'vip_midnight' && (
-                      <div className="absolute inset-0 bg-[radial-gradient(circle_at_38%_45%,rgba(59,130,246,0.16),transparent_70%)] pointer-events-none" />
-                    )}
-                  </div>
+                  {/* BACKGROUND LAYER: Custom Image OR Preset Theme */}
+                  {bgTheme === 'custom' && customBgUrl ? (
+                    <img 
+                      src={customBgUrl} 
+                      alt="Custom Background" 
+                      className="absolute inset-0 w-full h-full object-cover pointer-events-none select-none"
+                    />
+                  ) : (
+                    <div className={`absolute inset-0 ${BG_THEMES.find(t => t.id === bgTheme)?.class || 'bg-[#060b17]'}`}>
+                      {bgTheme === 'vip_midnight' && (
+                        <div className="absolute inset-0 bg-[radial-gradient(circle_at_38%_45%,rgba(59,130,246,0.16),transparent_70%)] pointer-events-none" />
+                      )}
+                    </div>
+                  )}
 
-                  {/* Gold Luxury Double Borders matching VIP 15 reference */}
+                  {/* Gold Luxury Double Borders */}
                   {showGoldBorders && bgTheme !== 'transparent' && (
                     <div className="absolute inset-0 pointer-events-none">
                       <div className="absolute inset-2 sm:inset-3 border-2 border-amber-400/80 rounded-2xl" />
@@ -1404,7 +1826,7 @@ export const SmartSvgaShowcaseModal: React.FC<SmartSvgaShowcaseModalProps> = ({
                     </div>
                   )}
 
-                  {/* Top-Right VIP Title Header matching VIP 15 reference */}
+                  {/* Top-Right VIP Title Header */}
                   {showVipTitle && vipMainTitle && bgTheme !== 'transparent' && (
                     <div className="absolute top-4 right-6 z-30 text-right pointer-events-none">
                       <h2 className="text-xl sm:text-2xl font-black bg-gradient-to-r from-yellow-200 via-amber-300 to-yellow-500 bg-clip-text text-transparent drop-shadow-md tracking-wider">
@@ -1418,7 +1840,7 @@ export const SmartSvgaShowcaseModal: React.FC<SmartSvgaShowcaseModalProps> = ({
                     </div>
                   )}
 
-                  {/* Top-Left Pill Badge: "📦 PACK · 42" */}
+                  {/* Top-Left Pill Badge */}
                   {showPackBadge && packBadgeText && (
                     <div 
                       className={`absolute top-4 left-5 z-30 flex items-center gap-2 px-3 py-1 rounded-xl font-black text-xs shadow-xl pointer-events-none ${
@@ -1443,7 +1865,7 @@ export const SmartSvgaShowcaseModal: React.FC<SmartSvgaShowcaseModalProps> = ({
                     </div>
                   )}
 
-                  {/* Placed Gift Items on Canvas (With STRICT contain ratio & zero distortion) */}
+                  {/* Placed Gift Items on Canvas (Non-overlapping with strict aspect ratio) */}
                   {giftItems.map((item) => {
                     if (!item.visible) return null;
 
@@ -1472,7 +1894,6 @@ export const SmartSvgaShowcaseModal: React.FC<SmartSvgaShowcaseModalProps> = ({
                           transformOrigin: 'center center'
                         }}
                       >
-                        {/* The Gift Graphic: object-contain guarantees NO DISTORTION whatsoever */}
                         <div className="w-full h-full relative flex items-center justify-center p-0.5">
                           {item.dataUrl ? (
                             <img
@@ -1490,14 +1911,12 @@ export const SmartSvgaShowcaseModal: React.FC<SmartSvgaShowcaseModalProps> = ({
                             </div>
                           )}
 
-                          {/* Item Label Tag matching VIP 15 reference */}
                           {showItemLabels && (
                             <div className="absolute -bottom-3 left-1/2 -translate-x-1/2 px-2.5 py-0.5 rounded-lg bg-slate-950/90 border border-amber-400/30 text-[9px] font-bold text-slate-100 backdrop-blur-sm whitespace-nowrap shadow-md pointer-events-none">
                               {item.name}
                             </div>
                           )}
 
-                          {/* Selection bounding box handles */}
                           {isSelected && (
                             <>
                               <div className="absolute -top-1.5 -left-1.5 w-3 h-3 bg-amber-400 border border-slate-950 rounded-full" />
@@ -1511,7 +1930,7 @@ export const SmartSvgaShowcaseModal: React.FC<SmartSvgaShowcaseModalProps> = ({
                     );
                   })}
 
-                  {/* Watermark Overlay in Workspace */}
+                  {/* Watermark Overlay */}
                   {watermarkEnabled && watermarkText && (
                     <div className="absolute inset-0 pointer-events-none overflow-hidden flex flex-wrap gap-20 p-10 opacity-20 -rotate-12">
                       {Array.from({ length: 15 }).map((_, i) => (
@@ -1525,10 +1944,50 @@ export const SmartSvgaShowcaseModal: React.FC<SmartSvgaShowcaseModalProps> = ({
               )}
             </div>
 
-            {/* SMART CONTROL SIDEBAR (RIGHT) */}
+            {/* CONTROL SIDEBAR (RIGHT) */}
             <div className="w-full lg:w-80 bg-slate-950/95 border-t lg:border-t-0 lg:border-r border-white/10 flex flex-col overflow-y-auto p-4 gap-4 text-slate-200 shrink-0">
               
-              {/* SECTION 1: LAYOUT PRESETS (القوالب الذكية) */}
+              {/* SECTION 1: CUSTOM BACKGROUND UPLOAD (رفع خلفية مخصصة) */}
+              <div className="flex flex-col gap-2 p-3 rounded-2xl bg-purple-500/10 border border-purple-400/30">
+                <div className="flex items-center justify-between">
+                  <span className="text-[10px] px-2 py-0.5 rounded bg-purple-400/20 text-purple-300 font-bold">
+                    جديد 🖼️
+                  </span>
+                  <label className="text-xs font-black text-purple-200 flex items-center gap-1.5">
+                    <ImageIcon className="w-4 h-4 text-purple-400" />
+                    <span>خلفية مخصصة من جهازك</span>
+                  </label>
+                </div>
+
+                <p className="text-[10px] text-slate-400">
+                  ارفع أي صورة من جهازك لتوضع كخلفية فخمة وراء الهدايا مباشرةً
+                </p>
+
+                <button
+                  onClick={() => bgUploadRef.current?.click()}
+                  className="w-full py-2 px-3 rounded-xl bg-purple-600 hover:bg-purple-500 text-white font-bold text-xs flex items-center justify-center gap-2 transition-all active:scale-95 shadow-md shadow-purple-600/20 cursor-pointer"
+                >
+                  <Upload className="w-4 h-4" />
+                  <span>{customBgUrl ? 'تغيير صورة الخلفية' : 'رفع صورة خلفية الآن'}</span>
+                </button>
+
+                {customBgUrl && (
+                  <div className="flex items-center justify-between pt-1">
+                    <button
+                      onClick={() => { setCustomBgUrl(null); setBgTheme('vip_midnight'); }}
+                      className="text-[11px] text-rose-400 hover:text-rose-300 font-bold underline"
+                    >
+                      إلغاء واستعادة الخلفية الأصلية
+                    </button>
+                    <span className="text-[10px] text-emerald-400 font-bold flex items-center gap-1">
+                      <Check className="w-3 h-3" />
+                      مفعلة
+                    </span>
+                  </div>
+                )}
+              </div>
+
+              {/* SECTION 2: LAYOUT PRESETS */}
               <div className="flex flex-col gap-2">
                 <div className="flex items-center justify-between">
                   <span className="text-[11px] font-mono text-amber-400 font-bold">
@@ -1536,7 +1995,7 @@ export const SmartSvgaShowcaseModal: React.FC<SmartSvgaShowcaseModalProps> = ({
                   </span>
                   <label className="text-xs font-black text-white flex items-center gap-1.5">
                     <LayoutGrid className="w-4 h-4 text-amber-400" />
-                    <span>أنماط التوزيع والترتيب الذكي</span>
+                    <span>أنماط التوزيع والترتيب (بدون تداخل)</span>
                   </label>
                 </div>
 
@@ -1623,7 +2082,7 @@ export const SmartSvgaShowcaseModal: React.FC<SmartSvgaShowcaseModalProps> = ({
                 </div>
               </div>
 
-              {/* SECTION 2: LUXURY OVERLAYS & HEADERS (إطارات وعناوين VIP) */}
+              {/* SECTION 3: LUXURY OVERLAYS & HEADERS */}
               <div className="flex flex-col gap-2 p-3 rounded-2xl bg-white/5 border border-white/10">
                 <label className="text-xs font-black text-amber-300 flex items-center justify-between">
                   <input
@@ -1675,11 +2134,11 @@ export const SmartSvgaShowcaseModal: React.FC<SmartSvgaShowcaseModalProps> = ({
                 </label>
               </div>
 
-              {/* SECTION 3: BACKGROUND THEMES (الخلفيات) */}
+              {/* SECTION 4: BACKGROUND PRESET THEMES */}
               <div className="flex flex-col gap-2">
                 <label className="text-xs font-black text-white flex items-center gap-1.5">
                   <Palette className="w-4 h-4 text-amber-400" />
-                  <span>طابع ولون الخلفية</span>
+                  <span>طابع ولون الخلفيات الجاهزة</span>
                 </label>
                 <div className="grid grid-cols-2 gap-1.5">
                   {BG_THEMES.map((theme) => (
@@ -1699,7 +2158,7 @@ export const SmartSvgaShowcaseModal: React.FC<SmartSvgaShowcaseModalProps> = ({
                 </div>
               </div>
 
-              {/* SECTION 4: SELECTED ITEM EDIT CONTROLS (التحكم في العنصر المحدد) */}
+              {/* SECTION 5: SELECTED ITEM CONTROLS */}
               {selectedItem ? (
                 <div className="flex flex-col gap-2.5 p-3 rounded-2xl bg-amber-500/10 border border-amber-400/30">
                   <div className="flex items-center justify-between">
@@ -1715,7 +2174,6 @@ export const SmartSvgaShowcaseModal: React.FC<SmartSvgaShowcaseModalProps> = ({
                     </span>
                   </div>
 
-                  {/* Scale Slider */}
                   <div className="flex flex-col gap-1">
                     <div className="flex justify-between text-[11px] text-slate-300">
                       <span>{Math.round(selectedItem.scale * 100)}%</span>
@@ -1732,7 +2190,6 @@ export const SmartSvgaShowcaseModal: React.FC<SmartSvgaShowcaseModalProps> = ({
                     />
                   </div>
 
-                  {/* Rotation Slider */}
                   <div className="flex flex-col gap-1">
                     <div className="flex justify-between text-[11px] text-slate-300">
                       <span>{selectedItem.rotation}°</span>
@@ -1749,7 +2206,6 @@ export const SmartSvgaShowcaseModal: React.FC<SmartSvgaShowcaseModalProps> = ({
                     />
                   </div>
 
-                  {/* Layer ordering buttons */}
                   <div className="flex items-center gap-1.5 pt-1">
                     <button
                       onClick={() => bringToFront(selectedItem.id)}
@@ -1773,7 +2229,7 @@ export const SmartSvgaShowcaseModal: React.FC<SmartSvgaShowcaseModalProps> = ({
                 </div>
               )}
 
-              {/* SECTION 5: WATERMARK & PROTECTION (العلامة المائية) */}
+              {/* SECTION 6: WATERMARK & PROTECTION */}
               <div className="flex flex-col gap-2 p-3 rounded-2xl bg-white/5 border border-white/10">
                 <label className="text-xs font-black text-slate-300 flex items-center justify-between">
                   <input

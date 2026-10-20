@@ -333,32 +333,47 @@ export const Header: React.FC<HeaderProps> = (props) => {
   };
 
   const scrollRef = useRef<HTMLElement>(null);
+  const continuousScrollRef = useRef<NodeJS.Timeout | null>(null);
+  const [isRibbonExpanded, setIsRibbonExpanded] = useState<boolean>(() => {
+    if (typeof window !== 'undefined') {
+      return localStorage.getItem('header_ribbon_expanded') === 'true';
+    }
+    return false;
+  });
+
+  const toggleRibbonExpanded = () => {
+    setIsRibbonExpanded(prev => {
+      const next = !prev;
+      localStorage.setItem('header_ribbon_expanded', String(next));
+      return next;
+    });
+  };
 
   // Auto-scroll logic: smoothly centers the active tool into view from left to right (whether starred or unstarred)
   useEffect(() => {
-    if (scrollRef.current && props.currentTab) {
+    if (scrollRef.current && props.currentTab && !isRibbonExpanded) {
       const activeElement = scrollRef.current.querySelector<HTMLElement>('[data-active="true"]');
       if (activeElement) {
         activeElement.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'center' });
       }
     }
-  }, [props.currentTab]);
+  }, [props.currentTab, isRibbonExpanded]);
 
   const handleNavWheel = (e: React.WheelEvent<HTMLElement>) => {
-    if (scrollRef.current) {
-      // Allow scrolling left and right using either horizontal wheel or vertical wheel
-      const delta = Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY;
-      scrollRef.current.scrollLeft += delta;
+    if (scrollRef.current && !isRibbonExpanded) {
+      // In RTL layout, scrolling wheel down (deltaY > 0) should move left (negative scrollLeft)
+      const delta = Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : -e.deltaY;
+      scrollRef.current.scrollLeft += delta * 1.4;
     }
   };
 
-  // Drag to scroll handlers
+  // Drag to scroll handlers (works smoothly even when grabbing directly on buttons)
   const handleNavMouseDown = (e: React.MouseEvent<HTMLElement>) => {
-    // If mouse down originated on an interactive button/star, do not intercept for drag
-    if ((e.target as HTMLElement).closest('button, [data-interactive="true"]')) {
+    // Only ignore if clicking the star toggle directly
+    if ((e.target as HTMLElement).closest('[data-interactive="true"]')) {
       return;
     }
-    if (!scrollRef.current) return;
+    if (!scrollRef.current || isRibbonExpanded) return;
     setIsNavDragging(true);
     dragStartX.current = e.pageX;
     dragScrollLeft.current = scrollRef.current.scrollLeft;
@@ -369,22 +384,48 @@ export const Header: React.FC<HeaderProps> = (props) => {
     if (!isNavDragging || !scrollRef.current) return;
     const deltaX = e.pageX - dragStartX.current;
     dragDistance.current = Math.abs(deltaX);
-    scrollRef.current.scrollLeft = dragScrollLeft.current - deltaX;
+    if (dragDistance.current > 4) {
+      scrollRef.current.scrollLeft = dragScrollLeft.current - deltaX * 1.25;
+    }
   };
 
   const handleNavMouseUp = () => {
-    setIsNavDragging(false);
+    if (isNavDragging) {
+      setTimeout(() => {
+        setIsNavDragging(false);
+      }, 20);
+    }
   };
 
   const handleNavScroll = (direction: 'left' | 'right') => {
     if (scrollRef.current) {
-      const scrollStep = 260;
+      const scrollStep = 340;
       scrollRef.current.scrollBy({
         left: direction === 'left' ? -scrollStep : scrollStep,
         behavior: 'smooth'
       });
     }
   };
+
+  const startContinuousScroll = (direction: 'left' | 'right') => {
+    stopContinuousScroll();
+    continuousScrollRef.current = setInterval(() => {
+      if (scrollRef.current) {
+        scrollRef.current.scrollLeft += direction === 'left' ? -18 : 18;
+      }
+    }, 16);
+  };
+
+  const stopContinuousScroll = () => {
+    if (continuousScrollRef.current) {
+      clearInterval(continuousScrollRef.current);
+      continuousScrollRef.current = null;
+    }
+  };
+
+  useEffect(() => {
+    return () => stopContinuousScroll();
+  }, []);
 
   // Next and Previous Tool Navigation for Unstarred/Moving Tools
   const currentUnstarredIndex = useMemo(() => {
@@ -434,6 +475,7 @@ export const Header: React.FC<HeaderProps> = (props) => {
     const isAfterEffects = tool.id === 'after-effects-studio';
     const isLayerEditor = tool.id === 'svga-layer-editor';
     const isCollageStudio = tool.id === 'image-collage-studio';
+    const isVipFeature = Boolean(tool.isVip || isLayerEditor || props.settings?.vibFeatures?.includes(tool.id));
     const displayLabel = tool.shortLabel || tool.label;
 
     return (
@@ -447,103 +489,102 @@ export const Header: React.FC<HeaderProps> = (props) => {
           data-tool-id={tool.id}
           onClick={(e) => {
             e.stopPropagation();
-            if (isNavDragging && dragDistance.current > 10) return;
-
-            if (isToolActive) {
-              if (isItemStarred) {
-                handleToolClick(tool);
-              } else {
-                if (nextTool) {
-                  handleToolClick(nextTool);
-                }
-              }
-            } else {
-              handleToolClick(tool);
-            }
+            if (dragDistance.current > 6) return;
+            handleToolClick(tool);
           }}
-          className={`h-9 md:h-10 px-3 md:px-3.5 flex items-center justify-center gap-2 rounded-xl transition-all duration-200 select-none cursor-pointer shrink-0 whitespace-nowrap border text-xs md:text-[13px] font-bold ${
+          className={`h-9 px-2.5 sm:px-3 flex items-center justify-center gap-1.5 rounded-xl transition-all duration-150 select-none cursor-pointer shrink-0 whitespace-nowrap border text-xs font-bold shadow-[inset_0_1px_0_rgba(255,255,255,0.06)] ${
             isAfterEffects
               ? isToolActive
-                ? 'bg-gradient-to-r from-red-600 via-rose-600 to-red-700 text-white font-black shadow-[0_0_24px_rgba(239,68,68,0.9)] border-red-200 scale-[1.02]'
-                : 'bg-gradient-to-r from-red-600/30 via-rose-600/25 to-red-700/30 hover:from-red-600/50 hover:to-red-700/50 text-red-100 hover:text-white border-red-500/70 hover:border-red-400 shadow-[0_0_16px_rgba(239,68,68,0.45)] font-black'
+                ? 'bg-gradient-to-r from-rose-600 to-red-600 text-white border-rose-300/60 shadow-[0_4px_16px_rgba(225,29,72,0.45)]'
+                : 'bg-rose-950/45 hover:bg-rose-900/60 text-rose-100 hover:text-white border-rose-500/40 hover:border-rose-400/70'
               : isLayerEditor
                 ? isToolActive
-                  ? 'bg-gradient-to-r from-amber-500 via-yellow-400 to-amber-600 text-black font-black shadow-[0_0_24px_rgba(245,158,11,0.7)] border-amber-200 scale-[1.02]'
-                  : 'bg-gradient-to-r from-amber-500/25 via-yellow-500/20 to-amber-600/25 hover:from-amber-500/40 hover:to-amber-600/40 text-amber-200 hover:text-amber-100 border-amber-500/60 hover:border-amber-400 shadow-[0_0_16px_rgba(245,158,11,0.3)] font-black'
+                  ? 'bg-gradient-to-r from-amber-500 to-yellow-500 text-slate-950 font-black border-amber-200 shadow-[0_4px_16px_rgba(245,158,11,0.4)]'
+                  : 'bg-amber-950/40 hover:bg-amber-900/55 text-amber-100 hover:text-white border-amber-500/40 hover:border-amber-400/70'
               : isCollageStudio
                 ? isToolActive
-                  ? 'bg-gradient-to-r from-cyan-500 via-teal-400 to-emerald-500 text-black font-black shadow-[0_0_24px_rgba(6,182,212,0.85)] border-cyan-200 scale-[1.02]'
-                  : 'bg-gradient-to-r from-cyan-600/35 via-teal-600/30 to-emerald-600/35 hover:from-cyan-500/60 hover:to-emerald-600/60 text-cyan-100 hover:text-white border-cyan-400/80 hover:border-cyan-300 shadow-[0_0_16px_rgba(6,182,212,0.45)] font-black'
+                  ? 'bg-gradient-to-r from-cyan-500 to-teal-400 text-slate-950 font-black border-cyan-200 shadow-[0_4px_16px_rgba(6,182,212,0.4)]'
+                  : 'bg-cyan-950/40 hover:bg-cyan-900/55 text-cyan-100 hover:text-white border-cyan-500/40 hover:border-cyan-400/70'
               : isToolActive 
-                ? tool.isVip
-                  ? 'bg-gradient-to-r from-amber-500 via-yellow-400 to-amber-600 text-black font-black shadow-[0_0_24px_rgba(245,158,11,0.65)] border border-amber-200 scale-[1.02]'
+                ? isVipFeature
+                  ? 'bg-gradient-to-r from-amber-500 to-yellow-500 text-slate-950 font-black border-amber-200 shadow-[0_4px_14px_rgba(245,158,11,0.35)]'
+                  : 'bg-gradient-to-r from-indigo-600 to-blue-600 text-white border-indigo-300/50 shadow-[0_4px_14px_rgba(79,70,229,0.4)]'
+                : isVipFeature
+                  ? 'bg-amber-500/[0.08] hover:bg-amber-500/[0.16] text-amber-200 hover:text-white border-amber-500/30 hover:border-amber-400/60'
                   : isItemStarred
-                    ? 'bg-gradient-to-r from-amber-500 via-[#4DA3FF] to-[#8B5CF6] text-white shadow-[0_0_20px_rgba(245,158,11,0.45)] border border-amber-300/40 scale-[1.02]' 
-                    : 'bg-gradient-to-r from-[#4DA3FF] to-[#8B5CF6] text-white shadow-[0_0_18px_rgba(77,163,255,0.4)] border border-white/20 scale-[1.02]'
-                : tool.isVip
-                  ? 'text-amber-300 bg-amber-500/10 hover:bg-amber-500/20 border border-amber-400/50 hover:border-amber-300 shadow-[0_0_12px_rgba(245,158,11,0.18)] font-bold'
-                  : isItemStarred
-                    ? 'text-amber-200 bg-amber-500/10 hover:bg-amber-500/20 border border-amber-500/35 hover:border-amber-400/60 shadow-[0_0_10px_rgba(245,158,11,0.12)]'
-                    : tool.highlight
-                      ? 'text-[#4DA3FF] hover:text-white bg-[#4DA3FF]/10 hover:bg-[#4DA3FF]/20 border border-[#4DA3FF]/30 hover:border-[#4DA3FF]/50'
-                      : 'text-slate-300 hover:text-white bg-white/[0.04] hover:bg-white/[0.08] border border-white/[0.08] hover:border-white/20'
+                    ? 'bg-indigo-500/[0.1] hover:bg-indigo-500/[0.18] text-indigo-100 hover:text-white border-indigo-400/30 hover:border-indigo-400/60'
+                    : 'bg-[#0f172a]/80 hover:bg-[#1e293b] text-slate-200 hover:text-white border-white/[0.08] hover:border-white/[0.2]'
           }`}
           title={
             isToolActive
               ? `${tool.label} (نشطة حالياً)`
-              : tool.isVip
-                ? `${tool.descAr} (👑 ميزة VIP مثبتة ومميزة)`
+              : isVipFeature
+                ? `${tool.label} — ${tool.descAr} (👑 ميزة VIP)`
                 : isItemStarred 
-                  ? `${tool.descAr} (أداة مثبتة بنجمة)` 
-                  : `${tool.descAr}`
+                  ? `${tool.label} — ${tool.descAr} (أداة مثبتة بنجمة)` 
+                  : `${tool.label} — ${tool.descAr}`
           }
         >
-          {isAfterEffects ? (
-            <Film className="w-4 h-4 text-red-300 fill-red-500/30 shrink-0" />
-          ) : isLayerEditor ? (
-            <Layers className="w-4 h-4 text-amber-400 shrink-0" />
-          ) : isCollageStudio ? (
-            <LayoutGrid className="w-4 h-4 text-cyan-300 shrink-0" />
-          ) : (
-            React.cloneElement(tool.icon as React.ReactElement<any>, { className: 'w-4 h-4 shrink-0' })
-          )}
+          <span className={`w-5 h-5 rounded-lg flex items-center justify-center shrink-0 ${
+            isToolActive
+              ? 'bg-black/15'
+              : isAfterEffects
+                ? 'bg-rose-500/20 text-rose-300'
+                : isLayerEditor || isVipFeature
+                  ? 'bg-amber-500/20 text-amber-300'
+                  : isCollageStudio
+                    ? 'bg-cyan-500/20 text-cyan-300'
+                    : 'bg-white/[0.06]'
+          }`}>
+            {isAfterEffects ? (
+              <Film className="w-3.5 h-3.5 text-rose-300 shrink-0" />
+            ) : isLayerEditor ? (
+              <Layers className={`w-3.5 h-3.5 shrink-0 ${isToolActive ? 'text-slate-950' : 'text-amber-400'}`} />
+            ) : isCollageStudio ? (
+              <LayoutGrid className={`w-3.5 h-3.5 shrink-0 ${isToolActive ? 'text-slate-950' : 'text-cyan-300'}`} />
+            ) : (
+              React.cloneElement(tool.icon as React.ReactElement<any>, { className: 'w-3.5 h-3.5 shrink-0' })
+            )}
+          </span>
           
-          <span className="whitespace-nowrap shrink-0">{displayLabel}</span>
+          <span className="whitespace-nowrap shrink-0 tracking-tight">{displayLabel}</span>
           
           {isAfterEffects ? (
-            <span className="text-[9px] font-black px-1.5 py-0.5 rounded-full bg-red-600 text-white shadow-[0_0_10px_rgba(239,68,68,0.9)] shrink-0 border border-red-300 leading-none">
-              PRO 🎬
+            <span className="text-[9px] font-extrabold px-1.5 py-0.5 rounded-md bg-rose-500/30 text-rose-100 border border-rose-400/40 shrink-0 leading-none">
+              PRO
             </span>
           ) : isCollageStudio ? (
-            <span className="text-[9px] font-black px-1.5 py-0.5 rounded-full bg-cyan-400 text-black shadow-[0_0_10px_rgba(6,182,212,0.8)] shrink-0 leading-none select-none">
-              جديد 🖼️
+            <span className={`text-[9px] font-extrabold px-1.5 py-0.5 rounded-md shrink-0 leading-none select-none ${
+              isToolActive ? 'bg-slate-950/20 text-slate-950' : 'bg-cyan-500/25 text-cyan-200 border border-cyan-400/30'
+            }`}>
+              جديد
             </span>
-          ) : (tool.isVip || isLayerEditor || props.settings?.vibFeatures?.includes(tool.id)) ? (
-            <span className="text-[9px] font-black px-1.5 py-0.5 rounded-full bg-gradient-to-r from-amber-400 to-yellow-300 text-black shadow-[0_0_10px_rgba(251,191,36,0.6)] shrink-0 leading-none select-none">
-              VIP 👑
+          ) : isVipFeature ? (
+            <span className={`text-[9px] font-extrabold px-1.5 py-0.5 rounded-md shrink-0 leading-none select-none ${
+              isToolActive
+                ? 'bg-slate-950/20 text-slate-950'
+                : 'bg-amber-500/20 text-amber-300 border border-amber-400/30'
+            }`}>
+              VIP
             </span>
           ) : null}
 
-          {tool.highlight && !isToolActive && !isItemStarred && !tool.isVip && !isAfterEffects && !isLayerEditor && !isCollageStudio && (
-            <span className="w-1.5 h-1.5 rounded-full bg-cyan-400 animate-pulse shrink-0"></span>
-          )}
-
-          {/* Star Icon Toggle - Dedicated spacing so it is completely separated and never collides with VIP badge */}
+          {/* Star Icon Toggle - Zero dead space when unstarred, smooth reveal on hover */}
           {!isAfterEffects && !isLayerEditor && (
             <span
               data-interactive="true"
               onClick={(e) => handleToggleStar(tool, e)}
-              className={`p-1 rounded-full transition-all duration-200 cursor-pointer flex items-center justify-center shrink-0 ms-2 ${
+              className={`rounded-md transition-all duration-150 cursor-pointer flex items-center justify-center shrink-0 ${
                 isItemStarred
-                  ? 'opacity-100 hover:scale-125'
-                  : 'opacity-0 group-hover:opacity-100 hover:scale-125 text-slate-500 hover:text-amber-400'
+                  ? 'w-4 h-4 opacity-100 ms-0.5 hover:scale-125'
+                  : 'w-0 h-4 overflow-hidden opacity-0 group-hover:w-4 group-hover:opacity-100 group-hover:ms-0.5 text-slate-400 hover:text-amber-400'
               }`}
               title={isItemStarred ? 'أداة مثبتة بنجمة ⭐ (انقر لإلغاء التثبيت)' : 'تثبيت هذه الأداة بنجمة ⭐'}
             >
               <Star
-                className={`w-3.5 h-3.5 transition-colors ${
+                className={`w-3 h-3 transition-colors ${
                   isItemStarred
-                    ? 'text-amber-400 fill-amber-400 drop-shadow-[0_0_6px_rgba(251,191,36,0.8)]'
+                    ? 'text-amber-400 fill-amber-400'
                     : 'hover:text-amber-400 hover:fill-amber-400/40'
                 }`}
               />
@@ -554,129 +595,20 @@ export const Header: React.FC<HeaderProps> = (props) => {
     );
   };
 
-  const TopLevelNavigation = () => (
-    <div className="flex items-center flex-1 min-w-0 max-w-full overflow-hidden mx-1 lg:mx-2.5 gap-1.5 sm:gap-2">
-      {/* 1. Primary Fixed Section (Logo -> مجموعة الأزرار الرئيسية) */}
-      {starredNavTools.length > 0 && (
-        <div className="hidden lg:flex items-center gap-1.5 sm:gap-2 shrink-0">
-          <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
-            {starredNavTools.map((tool) => renderNavToolButton(tool, true))}
-          </div>
+  const [activeBarFilter, setActiveBarFilter] = useState<'all' | 'starred' | 'svga' | 'image' | 'batch'>('all');
 
-          <div className="hidden sm:block w-[1.5px] h-6 bg-gradient-to-b from-transparent via-white/15 to-transparent shrink-0 mx-0.5" />
-        </div>
-      )}
+  const filteredRibbonUnstarredTools = useMemo(() => {
+    if (activeBarFilter === 'all') return unstarredNavTools;
+    if (activeBarFilter === 'starred') return unstarredNavTools.filter(t => isStarred(t.id));
+    if (activeBarFilter === 'batch') return unstarredNavTools.filter(t => t.category === 'batch' || t.category === 'audio' || t.category === 'store');
+    return unstarredNavTools.filter(t => t.category === activeBarFilter);
+  }, [unstarredNavTools, activeBarFilter, starredToolIds]);
 
-      {/* 2. Scrollable Secondary Tools Track (الأدوات الإضافية) - Always visible across viewports */}
-      <div className="flex items-center flex-1 min-w-0 overflow-hidden relative mx-0.5 sm:mx-1">
-        {/* Next / Step Forward Button (الزر المشروح في الصورة لتقليب وفتح المزايا) */}
-        <button
-          type="button"
-          onClick={() => handleNavToolStep('next')}
-          className="w-8 h-8 rounded-xl bg-slate-900/90 hover:bg-indigo-600 text-slate-300 hover:text-white border border-white/10 hover:border-indigo-400/50 shadow-md transition-all shrink-0 flex items-center justify-center active:scale-95 cursor-pointer ml-0.5 group"
-          title={nextTool ? `الانتقال إلى ${nextTool.label} وفتحها` : "الميزة التالية"}
-          aria-label={nextTool ? `الانتقال إلى ${nextTool.label} وفتحها` : "الميزة التالية"}
-        >
-          <ChevronRight className="w-4 h-4 shrink-0 transition-transform group-hover:scale-110" />
-        </button>
-
-        <nav 
-          ref={scrollRef} 
-          onWheel={handleNavWheel}
-          onMouseDown={handleNavMouseDown}
-          onMouseMove={handleNavMouseMove}
-          onMouseUp={handleNavMouseUp}
-          onMouseLeave={handleNavMouseUp}
-          className={`flex items-center gap-1.5 sm:gap-2 mx-1 text-xs font-bold overflow-x-auto no-scrollbar flex-1 whitespace-nowrap min-w-0 px-0.5 scroll-smooth select-none ${
-            isNavDragging ? 'cursor-grabbing' : 'cursor-grab'
-          }`} 
-        >
-          <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
-            {unstarredNavTools.map((tool) => renderNavToolButton(tool, false))}
-          </div>
-        </nav>
-
-        {/* Previous / Step Backward Button (الانتقال للميزة السابقة وفتحها) */}
-        <button
-          type="button"
-          onClick={() => handleNavToolStep('prev')}
-          className="w-8 h-8 rounded-xl bg-slate-900/90 hover:bg-indigo-600 text-slate-300 hover:text-white border border-white/10 hover:border-indigo-400/50 shadow-md transition-all shrink-0 flex items-center justify-center active:scale-95 cursor-pointer mr-0.5 group"
-          title={prevTool ? `الانتقال إلى ${prevTool.label} وفتحها` : "الميزة السابقة"}
-          aria-label={prevTool ? `الانتقال إلى ${prevTool.label} وفتحها` : "الميزة السابقة"}
-        >
-          <ChevronLeft className="w-4 h-4 shrink-0 transition-transform group-hover:scale-110" />
-        </button>
-      </div>
-
-      {/* Quick More Tools Dropdown - Always visible to ensure quick access */}
-      <div className="relative shrink-0 mr-1" ref={moreToolsMenuRef}>
-        <button
-          type="button"
-          onClick={() => setIsMoreToolsOpen(prev => !prev)}
-          className={`h-8 md:h-9 px-2.5 sm:px-3 rounded-xl border flex items-center gap-1.5 text-xs font-bold transition-all cursor-pointer shrink-0 ${
-            isMoreToolsOpen
-              ? 'bg-indigo-600/30 text-white border-indigo-400 shadow-[0_0_12px_rgba(99,102,241,0.3)]'
-              : 'bg-white/[0.04] hover:bg-white/[0.08] text-slate-300 hover:text-white border-white/[0.08] hover:border-white/[0.15]'
-          }`}
-          title="قائمة الأدوات الإضافية / More Tools"
-        >
-          <SlidersHorizontal className="w-3.5 h-3.5 text-indigo-400 shrink-0" />
-          <span className="hidden sm:inline-block text-[11px] text-slate-300 font-bold shrink-0">المزيد</span>
-          <ChevronDown className={`w-3 h-3 text-slate-400 transition-transform ${isMoreToolsOpen ? 'rotate-180' : ''}`} />
-        </button>
-
-        <AnimatePresence>
-          {isMoreToolsOpen && (
-            <motion.div
-              initial={{ opacity: 0, y: 8, scale: 0.96 }}
-              animate={{ opacity: 1, y: 0, scale: 1 }}
-              exit={{ opacity: 0, y: 8, scale: 0.96 }}
-              transition={{ duration: 0.15 }}
-              className="absolute top-full mt-2 end-0 w-72 bg-[#0c1222]/98 backdrop-blur-2xl border border-white/10 rounded-2xl shadow-2xl p-2 z-[1100] flex flex-col gap-1 max-h-[460px] overflow-y-auto custom-scrollbar"
-              dir="rtl"
-            >
-              <div className="px-3 py-1.5 text-[11px] font-black text-indigo-300 border-b border-white/10 flex items-center justify-between">
-                <span className="flex items-center gap-1.5">
-                  <SlidersHorizontal className="w-3.5 h-3.5 text-indigo-400" />
-                  <span>كافة الأدوات الإضافية</span>
-                </span>
-                <span className="text-[10px] text-slate-400 font-mono">
-                  {unstarredNavTools.length} أداة
-                </span>
-              </div>
-              {unstarredNavTools.map(tool => {
-                const isCurrent = props.currentTab === tool.id;
-                return (
-                  <button
-                    key={tool.id}
-                    onClick={() => {
-                      handleToolClick(tool);
-                      setIsMoreToolsOpen(false);
-                    }}
-                    className={`w-full flex items-center justify-between px-3 py-2 rounded-xl text-xs font-bold transition-all cursor-pointer text-right ${
-                      isCurrent
-                        ? 'bg-indigo-600 text-white shadow-md'
-                        : 'text-slate-300 hover:text-white hover:bg-white/10'
-                    }`}
-                  >
-                    <span className="flex items-center gap-2 truncate">
-                      {React.cloneElement(tool.icon as React.ReactElement<any>, { className: 'w-4 h-4 shrink-0 text-indigo-400' })}
-                      <span className="truncate">{tool.label}</span>
-                    </span>
-                    {(tool.isVip || props.settings?.vibFeatures?.includes(tool.id)) && (
-                      <span className="text-[9px] font-black px-1.5 py-0.5 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/40 shrink-0">
-                        VIP 👑
-                      </span>
-                    )}
-                  </button>
-                );
-              })}
-            </motion.div>
-          )}
-        </AnimatePresence>
-      </div>
-    </div>
-  );
+  const filteredRibbonStarredTools = useMemo(() => {
+    if (activeBarFilter === 'all' || activeBarFilter === 'starred') return starredNavTools;
+    if (activeBarFilter === 'batch') return starredNavTools.filter(t => t.category === 'batch' || t.category === 'audio' || t.category === 'store');
+    return starredNavTools.filter(t => t.category === activeBarFilter);
+  }, [starredNavTools, activeBarFilter]);
 
   return (
     <>
@@ -688,7 +620,7 @@ export const Header: React.FC<HeaderProps> = (props) => {
             animate={{ opacity: 1, y: 0, scale: 1 }}
             exit={{ opacity: 0, y: -20, scale: 0.9 }}
             transition={{ duration: 0.2 }}
-            className="fixed top-24 left-1/2 -translate-x-1/2 z-[2500] px-4 py-2.5 rounded-2xl bg-slate-950/95 border border-amber-500/40 shadow-[0_10px_30px_rgba(0,0,0,0.8)] backdrop-blur-xl flex items-center gap-2.5 text-xs sm:text-sm font-bold text-amber-300 pointer-events-none"
+            className="fixed top-28 left-1/2 -translate-x-1/2 z-[2500] px-4 py-2.5 rounded-2xl bg-slate-950/95 border border-amber-500/40 shadow-[0_10px_30px_rgba(0,0,0,0.8)] backdrop-blur-xl flex items-center gap-2.5 text-xs sm:text-sm font-bold text-amber-300 pointer-events-none"
             dir="rtl"
           >
             <Star className="w-4 h-4 text-amber-400 fill-amber-400 animate-pulse" />
@@ -725,286 +657,477 @@ export const Header: React.FC<HeaderProps> = (props) => {
           transform: isHeaderVisible ? 'translateY(0)' : 'translateY(-140%)',
           opacity: isHeaderVisible ? 1 : 0,
           pointerEvents: isHeaderVisible ? 'auto' : 'none',
-          transition: 'all 0.35s cubic-bezier(0.16, 1, 0.3, 1)',
-          backgroundColor: activeThemeConfig?.cardBg || 'rgba(9, 14, 28, 0.92)',
+          transition: 'all 0.3s cubic-bezier(0.16, 1, 0.3, 1)',
+          backgroundColor: activeThemeConfig?.cardBg || 'rgba(8, 12, 24, 0.95)',
           borderColor: activeThemeConfig?.borderColor || 'rgba(255, 255, 255, 0.09)',
-          boxShadow: `0 16px 45px rgba(0,0,0,0.75), 0 0 30px ${activeThemeConfig?.glowColor || 'rgba(99,102,241,0.2)'}`
+          boxShadow: `0 14px 40px rgba(0,0,0,0.75), 0 0 24px ${activeThemeConfig?.glowColor || 'rgba(99,102,241,0.16)'}`
         }}
-        className="fixed top-2.5 sm:top-3 left-3 sm:left-5 right-3 sm:right-5 h-16 md:h-20 backdrop-blur-2xl rounded-2xl md:rounded-3xl z-[3500] px-2.5 sm:px-4 md:px-6 flex items-center justify-between border gap-2 lg:gap-3 transition-colors duration-400"
+        className="fixed top-2 left-2.5 sm:left-4 right-2.5 sm:right-4 backdrop-blur-2xl rounded-2xl z-[3500] px-2.5 sm:px-3.5 py-1.5 flex flex-col gap-1.5 border transition-all duration-300"
       >
-        
-        {/* Logo */}
-        <div className="flex items-center shrink-0">
-          <button onClick={props.onLogoClick} className="flex items-center gap-2 md:gap-3 group shrink-0 text-start cursor-pointer">
-            <div className="w-9 h-9 md:w-11 md:h-11 rounded-xl md:rounded-2xl flex items-center justify-center shadow-lg shadow-amber-500/15 group-hover:scale-105 transition-all duration-300 relative overflow-hidden shrink-0">
-               <img 
-                 src={props.settings?.logoUrl || "/logo.png"} 
-                 alt="SVGA AHMED Logo" 
-                 className="w-full h-full object-contain relative z-10 drop-shadow-md" 
-               />
-            </div>
-            <div className="flex flex-col items-start hidden xl:flex shrink-0">
-              <h1 className="text-sm md:text-base font-black text-white tracking-tight whitespace-nowrap group-hover:text-amber-300 transition-colors">
-                {props.settings?.appName?.trim() ? props.settings.appName : 'SVGA AHMED'}
-              </h1>
-              <span className="text-[9px] text-amber-400/90 font-bold tracking-wider uppercase whitespace-nowrap">Professional Studio</span>
-            </div>
-          </button>
-        </div>
-
-        {/* Scrollable Horizontal Navigation */}
-        <TopLevelNavigation />
-
-        {/* Right Side Controls (Search, Pin Toggle, Admin, Profile) */}
-        <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
-
-          {/* Direct File Open & App/Project Download & Install Buttons */}
-          <PWAAndroidActionButtons variant="header" onOpenFile={props.onOpenFile} />
-
-          {/* Mega Tools Grid Trigger Button */}
-          <button
-            onClick={() => setIsAllToolsOpen(true)}
-            className="flex items-center justify-center gap-1.5 h-9 md:h-10 px-2 sm:px-2.5 bg-indigo-500/10 hover:bg-indigo-500/20 text-indigo-200 hover:text-white border border-indigo-500/25 hover:border-indigo-500/40 rounded-xl transition-all font-bold text-xs shrink-0 shadow-sm active:scale-95 cursor-pointer whitespace-nowrap"
-            title="استعراض كافة الأدوات في نافذة سريعة ومنظمة"
-          >
-            <LayoutGrid className="w-4 h-4 text-indigo-400 shrink-0" />
-            <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-indigo-500/30 text-indigo-100 font-mono font-bold shrink-0">
-              {allTools.length}
-            </span>
-          </button>
-
-          {/* Search Trigger */}
-          <button
-            onClick={() => setIsSearchOpen(true)}
-            className="flex items-center justify-center gap-1.5 h-9 md:h-10 px-2 sm:px-2.5 bg-white/[0.04] hover:bg-white/[0.08] border border-white/[0.08] hover:border-white/[0.15] rounded-xl transition-all text-slate-400 hover:text-white group cursor-pointer shrink-0 whitespace-nowrap"
-            title="بحث في كافة الأدوات (Ctrl + K)"
-          >
-            <Search className="w-4 h-4 text-indigo-400 group-hover:scale-110 transition-transform shrink-0" />
-            <div className="hidden sm:flex items-center gap-0.5 font-sans text-[10px] bg-slate-900/80 px-1.5 py-0.5 rounded-md border border-slate-700/60 text-slate-400 shrink-0">
-              <Command className="w-3 h-3" />
-              <span>K</span>
-            </div>
-          </button>
-
-          {/* Smart Circle Button for Studio Dimensions, Zoom & Themes ("الدايرة الذكية") */}
-          <button
-            onClick={() => setIsThemeDimensionsModalOpen(true)}
-            className="w-9 h-9 md:w-10 md:h-10 rounded-full transition-all duration-300 border flex items-center justify-center shrink-0 cursor-pointer relative group shadow-md hover:scale-105 active:scale-95"
-            style={{
-              background: activeThemeConfig?.previewGradient || 'linear-gradient(135deg, #6366f1 0%, #a855f7 100%)',
-              borderColor: 'rgba(255, 255, 255, 0.25)'
-            }}
-            title="تخصيص أبعاد ومقاسات وتصميم الموقع وراحة العين (الدايرة الذكية) 🎨📐"
-          >
-            <span className="text-base select-none">{activeThemeConfig?.iconSymbol || '🎨'}</span>
-            <span className="absolute -bottom-1 -start-1 text-[8px] font-black bg-black/80 px-1 rounded-full text-white font-mono">
-              {Math.round((zoomScale || 1) * 100)}%
-            </span>
-          </button>
-
-          {/* Pin / Auto-hide Toggle Button */}
-          <button
-            onClick={togglePin}
-            className={`w-9 h-9 md:w-10 md:h-10 rounded-xl transition-all duration-300 border flex items-center justify-center shrink-0 cursor-pointer ${
-              isPinned 
-                ? 'bg-indigo-600/20 text-indigo-300 border-indigo-500/35 shadow-[0_0_12px_rgba(99,102,241,0.2)]' 
-                : 'text-slate-400 hover:text-white hover:bg-white/[0.06] border-white/[0.08] hover:border-white/[0.15]'
-            }`}
-            title={isPinned ? 'الشريط مثبت دائماً (انقر للتبديل إلى الإخفاء التلقائي)' : 'الشريط في وضع الإخفاء التلقائي (انقر لتثبيته دائماً)'}
-          >
-            {isPinned ? <Pin className="w-4 h-4 text-indigo-400" /> : <PinOff className="w-4 h-4 opacity-70" />}
-          </button>
-
-          {/* Version Indicator Badge (Visible on large screens) */}
-          <button
-            onClick={() => setIsVersionModalOpen(true)}
-            className="hidden 2xl:flex items-center gap-1.5 h-9 md:h-10 px-2.5 bg-[#0e1629] hover:bg-[#131d36] border border-white/[0.08] hover:border-indigo-500/30 rounded-xl transition-all group shrink-0 cursor-pointer whitespace-nowrap"
-            title="معلومات الإصدار وتحديثات النظام"
-          >
-            <div className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse shadow-[0_0_6px_#34d399] shrink-0" />
-            <span className="text-[11px] font-mono font-bold text-slate-300 group-hover:text-white dir-ltr shrink-0">
-              {CURRENT_APP_VERSION}
-            </span>
-          </button>
-
-          {/* Language Switcher Dropdown */}
-          <div className="relative shrink-0" ref={langMenuRef}>
-            <button
-              onClick={() => setIsLangMenuOpen(prev => !prev)}
-              className={`h-9 md:h-10 px-2 sm:px-2.5 rounded-xl transition-all duration-300 border flex items-center gap-1 cursor-pointer shrink-0 whitespace-nowrap ${
-                isLangMenuOpen 
-                  ? 'bg-indigo-600/25 text-white border-indigo-400/50 shadow-[0_0_15px_rgba(99,102,241,0.25)]' 
-                  : 'text-slate-300 hover:text-white bg-white/[0.04] hover:bg-white/[0.08] border-white/[0.08]'
-              }`}
-              title="تغيير لغة الموقع / Change Language"
-            >
-              <Globe className="w-4 h-4 text-indigo-400 shrink-0" />
-              <span className="text-[11px] font-bold uppercase hidden 2xl:inline shrink-0">
-                {SUPPORTED_LANGUAGES.find(l => l.code === language)?.flag || '🌐'} {language}
-              </span>
-              <ChevronDown className={`w-3 h-3 text-slate-400 transition-transform shrink-0 ${isLangMenuOpen ? 'rotate-180' : ''}`} />
-            </button>
-
-            <AnimatePresence>
-              {isLangMenuOpen && (
-                <motion.div
-                  initial={{ opacity: 0, y: 8, scale: 0.96 }}
-                  animate={{ opacity: 1, y: 0, scale: 1 }}
-                  exit={{ opacity: 0, y: 8, scale: 0.96 }}
-                  transition={{ duration: 0.15 }}
-                  className="absolute top-full mt-2 end-0 w-52 bg-[#0c1222]/95 backdrop-blur-2xl border border-white/10 rounded-2xl shadow-2xl p-2 z-[1100] flex flex-col gap-1 text-start"
-                >
-                  <div className="px-3 py-1.5 text-[10px] font-bold text-slate-400 border-b border-white/10 flex items-center justify-between">
-                    <span>لغة الموقع / Language</span>
-                    <span className="text-indigo-400 font-mono">7 Languages</span>
-                  </div>
-                  {SUPPORTED_LANGUAGES.map(item => {
-                    const isSelected = language === item.code;
-                    return (
-                      <button
-                        key={item.code}
-                        onClick={() => {
-                          setLanguage(item.code as any);
-                          setIsLangMenuOpen(false);
-                        }}
-                        className={`w-full flex items-center justify-between px-3 py-2 rounded-xl text-xs font-bold transition-all cursor-pointer ${
-                          isSelected 
-                            ? 'bg-indigo-600 text-white shadow-md shadow-indigo-600/40' 
-                            : 'text-slate-300 hover:text-white hover:bg-white/10'
-                        }`}
-                      >
-                        <span className="flex items-center gap-2">
-                          <span className="text-base leading-none">{item.flag}</span>
-                          <span>{item.nativeName}</span>
-                        </span>
-                        {isSelected && <Check className="w-3.5 h-3.5 text-white" />}
-                      </button>
-                    );
-                  })}
-                </motion.div>
-              )}
-            </AnimatePresence>
-          </div>
-
-          {/* VIB/VIP Section Independent Icon/Button */}
-          <button 
-            type="button"
-            onClick={props.onVipClick}
-            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl border select-none shrink-0 transition-all duration-300 font-bold text-xs cursor-pointer ${
-              (props.currentUser?.isVIP || props.currentUser?.role === 'admin' || props.currentUser?.isSuperAdmin)
-                ? 'bg-gradient-to-r from-amber-500/20 via-yellow-500/25 to-amber-500/20 border-amber-400/40 shadow-[0_0_15px_rgba(245,158,11,0.2)] text-amber-300'
-                : 'bg-gradient-to-r from-amber-500/10 via-yellow-400/5 to-amber-500/10 border-amber-500/30 hover:border-amber-400 text-amber-200 hover:text-white shadow-[0_0_12px_rgba(245,158,11,0.1)] hover:scale-[1.03]'
-            }`}
-            title="باقة VIB الملكية - الميزات والاشتراك 👑"
-          >
-            <Crown className="w-4 h-4 text-amber-400 animate-pulse" />
-            <span>باقة VIB 👑</span>
-          </button>
-
-          {/* Expiring Soon Alert Badge in Header */}
-          {headerSubInfo?.isExpiringSoon && (
-            <button
-              onClick={props.onProfileClick}
-              className="hidden sm:flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl bg-amber-500/20 border border-amber-500/40 text-amber-300 text-xs font-black animate-pulse cursor-pointer shadow-sm shadow-amber-500/10 shrink-0 hover:bg-amber-500/30 transition-all"
-              title={`تنبيه: اقترب انتهاء الاشتراك (${headerSubInfo.formattedRemaining}) - انقر للتجديد`}
-            >
-              <AlertTriangle className="w-3.5 h-3.5 text-amber-400" />
-              <span className="hidden md:inline">{headerSubInfo.formattedRemaining}</span>
-            </button>
-          )}
-
-          {/* Expired Warning Badge in Header */}
-          {headerSubInfo?.isExpired && (
-            <button
-              onClick={props.onProfileClick}
-              className="hidden sm:flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl bg-rose-500/20 border border-rose-500/40 text-rose-300 text-xs font-black cursor-pointer shadow-sm shadow-rose-500/10 shrink-0 hover:bg-rose-500/30 transition-all"
-              title="الاشتراك منتهي - انقر للتجديد"
-            >
-              <AlertCircle className="w-3.5 h-3.5 text-rose-400" />
-              <span className="hidden md:inline">الاشتراك منتهي</span>
-            </button>
-          )}
-
-          {/* User Account / Profile Button with Live Subscription Status */}
-          {!props.currentUser ? (
-            <button
-              type="button"
-              onClick={props.onLoginClick}
-              className="flex items-center gap-1.5 h-9 md:h-10 px-3.5 rounded-xl bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-500 hover:to-purple-500 text-white font-bold text-xs cursor-pointer shadow-lg shadow-indigo-600/20 transition-all shrink-0 border border-indigo-500/30"
-              title="تسجيل الدخول أو إنشاء حساب جديد 🔐"
-            >
-              <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 16l-4-4m0 0l4-4m-4 4h14m-5 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 01-3-3h7a3 3 0 013 3v1" />
-              </svg>
-              <span>تسجيل الدخول</span>
-            </button>
-          ) : (
-            <button
-              onClick={props.onProfileClick}
-              className="flex items-center gap-2 h-9 md:h-10 px-2.5 rounded-xl bg-white/[0.04] hover:bg-white/[0.08] border border-white/[0.08] hover:border-indigo-500/40 transition-all cursor-pointer group shrink-0 whitespace-nowrap"
-              title="الملف الشخصي وتفاصيل الاشتراك وتاريخ الانتهاء"
-            >
-              {props.currentUser.photoURL ? (
-                <img 
-                  src={props.currentUser.photoURL} 
-                  alt={props.currentUser.name || 'حسابي'} 
-                  className="w-6 h-6 md:w-7 md:h-7 rounded-lg object-cover border border-white/20 shrink-0"
-                />
-              ) : (
-                <div className="w-6 h-6 md:w-7 md:h-7 rounded-lg bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center text-xs font-black text-white shadow-sm shrink-0">
-                  {(props.currentUser.name || props.currentUser.email || 'U')[0].toUpperCase()}
-                </div>
-              )}
-              <div className="hidden 2xl:flex flex-col text-right shrink-0">
-                <span className="text-xs font-bold text-slate-200 group-hover:text-white max-w-[85px] truncate leading-tight whitespace-nowrap">
-                  {props.currentUser.name || 'حسابي'}
-                </span>
-                <span className={`text-[10px] font-black leading-none whitespace-nowrap ${
-                  headerSubInfo?.isExpired 
-                    ? 'text-rose-400' 
-                    : headerSubInfo?.isExpiringSoon 
-                    ? 'text-amber-400' 
-                    : headerSubInfo?.isActive 
-                    ? 'text-emerald-400' 
-                    : 'text-slate-400'
-                }`}>
-                  {headerSubInfo?.statusLabelAr || 'عضو'}
-                </span>
+        {/* === TIER 1: Brand, Instant Category Filter Tabs & Studio Control Deck === */}
+        <div className="flex items-center justify-between w-full gap-2 min-h-[38px]">
+          {/* Right Zone: Logo + Category Filter Tabs */}
+          <div className="flex items-center gap-2 sm:gap-3 min-w-0">
+            <button onClick={props.onLogoClick} className="flex items-center gap-2 group shrink-0 text-start cursor-pointer">
+              <div className="w-8 h-8 sm:w-9 sm:h-9 rounded-xl flex items-center justify-center shadow-md shadow-amber-500/10 group-hover:scale-105 transition-all duration-300 relative overflow-hidden shrink-0 bg-white/[0.04] border border-white/[0.08]">
+                 <img 
+                   src={props.settings?.logoUrl || "/logo.png"} 
+                   alt="SVGA AHMED Logo" 
+                   className="w-full h-full object-contain relative z-10 drop-shadow-md p-0.5" 
+                 />
+              </div>
+              <div className="flex flex-col items-start shrink-0">
+                <h1 className="text-xs sm:text-sm font-black text-white tracking-tight whitespace-nowrap group-hover:text-amber-300 transition-colors leading-tight">
+                  {props.settings?.appName?.trim() ? props.settings.appName : 'SVGA AHMED'}
+                </h1>
+                <span className="text-[8px] text-amber-400/90 font-bold tracking-wider uppercase whitespace-nowrap">Professional Studio</span>
               </div>
             </button>
-          )}
 
-          <div className="w-px h-6 bg-white/[0.08] hidden sm:block shrink-0 mx-0.5"></div>
+            <div className="hidden md:block w-px h-5 bg-white/10 shrink-0" />
 
-          {props.isAdmin && (
-            <button
-              onClick={props.onAdminToggle}
-              className={`w-9 h-9 md:w-10 md:h-10 rounded-xl transition-all duration-300 border flex items-center justify-center shrink-0 cursor-pointer ${
-                props.isAdminOpen 
-                  ? 'bg-amber-500/20 text-amber-300 border-amber-500/40 shadow-[0_0_15px_rgba(245,158,11,0.2)]' 
-                  : 'text-slate-400 hover:text-white hover:bg-white/[0.06] border-white/[0.08] hover:border-white/[0.15]'
+            {/* Instant Category Filter Tabs (تسهيل الوصول للأدوات حسب القسم بضغطة واحدة) */}
+            <div className="hidden md:flex items-center gap-1 bg-[#050914]/80 border border-white/[0.06] rounded-xl p-0.5 overflow-x-auto no-scrollbar">
+              {[
+                { id: 'all', label: `الكل (${topNavTools.length})` },
+                { id: 'starred', label: 'المميزة ⭐' },
+                { id: 'svga', label: 'أنيميشن و SVGA' },
+                { id: 'image', label: 'الصور و AI' },
+                { id: 'batch', label: 'الدفعات والميديا' },
+              ].map((tab) => {
+                const isActive = activeBarFilter === tab.id;
+                return (
+                  <button
+                    key={tab.id}
+                    type="button"
+                    onClick={() => {
+                      setActiveBarFilter(tab.id as any);
+                      if (scrollRef.current) {
+                        scrollRef.current.scrollTo({ left: 0, behavior: 'smooth' });
+                      }
+                    }}
+                    className={`h-7 px-2.5 rounded-lg text-[11px] font-bold transition-all cursor-pointer whitespace-nowrap shrink-0 ${
+                      isActive
+                        ? 'bg-indigo-600 text-white shadow-sm'
+                        : 'text-slate-400 hover:text-white hover:bg-white/[0.05]'
+                    }`}
+                  >
+                    {tab.label}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* Left Zone: Studio Actions, Discovery, Preferences & Account Controls */}
+          <div className="flex items-center gap-1 sm:gap-1.5 shrink-0">
+            {/* Direct File Open Button */}
+            <PWAAndroidActionButtons variant="header" onOpenFile={props.onOpenFile} />
+
+            {/* Quick More Tools Dropdown */}
+            <div className="relative shrink-0" ref={moreToolsMenuRef}>
+              <button
+                type="button"
+                onClick={() => setIsMoreToolsOpen(prev => !prev)}
+                className={`h-8 px-2.5 rounded-xl border flex items-center gap-1.5 text-xs font-bold transition-all cursor-pointer shrink-0 ${
+                  isMoreToolsOpen
+                    ? 'bg-indigo-600/30 text-white border-indigo-400 shadow-[0_0_12px_rgba(99,102,241,0.3)]'
+                    : 'bg-[#0f172a]/90 hover:bg-[#1e293b] text-slate-200 hover:text-white border-white/[0.08] hover:border-white/[0.18]'
+                }`}
+                title="قائمة الأدوات السريعة / More Tools"
+              >
+                <SlidersHorizontal className="w-3.5 h-3.5 text-indigo-400 shrink-0" />
+                <span className="hidden sm:inline-block text-[11px] font-bold shrink-0">المزيد</span>
+                <ChevronDown className={`w-3 h-3 text-slate-400 transition-transform ${isMoreToolsOpen ? 'rotate-180' : ''}`} />
+              </button>
+
+              <AnimatePresence>
+                {isMoreToolsOpen && (
+                  <motion.div
+                    initial={{ opacity: 0, y: 8, scale: 0.96 }}
+                    animate={{ opacity: 1, y: 0, scale: 1 }}
+                    exit={{ opacity: 0, y: 8, scale: 0.96 }}
+                    transition={{ duration: 0.15 }}
+                    className="absolute top-full mt-2 end-0 w-72 bg-[#0c1222]/98 backdrop-blur-2xl border border-white/10 rounded-2xl shadow-2xl p-2 z-[1100] flex flex-col gap-1 max-h-[460px] overflow-y-auto custom-scrollbar"
+                    dir="rtl"
+                  >
+                    <div className="px-3 py-1.5 text-[11px] font-black text-indigo-300 border-b border-white/10 flex items-center justify-between">
+                      <span className="flex items-center gap-1.5">
+                        <SlidersHorizontal className="w-3.5 h-3.5 text-indigo-400" />
+                        <span>كافة الأدوات ({topNavTools.length})</span>
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          toggleRibbonExpanded();
+                          setIsMoreToolsOpen(false);
+                        }}
+                        className="text-[10px] text-amber-300 hover:text-amber-200 font-bold underline cursor-pointer"
+                      >
+                        {isRibbonExpanded ? 'طي الشريط' : 'فرد الشريط بالكامل'}
+                      </button>
+                    </div>
+                    {topNavTools.map(tool => {
+                      const isCurrent = props.currentTab === tool.id;
+                      return (
+                        <button
+                          key={tool.id}
+                          onClick={() => {
+                            handleToolClick(tool);
+                            setIsMoreToolsOpen(false);
+                          }}
+                          className={`w-full flex items-center justify-between px-3 py-2 rounded-xl text-xs font-bold transition-all cursor-pointer text-right ${
+                            isCurrent
+                              ? 'bg-indigo-600 text-white shadow-md'
+                              : 'text-slate-300 hover:text-white hover:bg-white/10'
+                          }`}
+                        >
+                          <span className="flex items-center gap-2 truncate">
+                            {React.cloneElement(tool.icon as React.ReactElement<any>, { className: 'w-4 h-4 shrink-0 text-indigo-400' })}
+                            <span className="truncate">{tool.label}</span>
+                          </span>
+                          {(tool.isVip || props.settings?.vibFeatures?.includes(tool.id)) && (
+                            <span className="text-[9px] font-black px-1.5 py-0.5 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/40 shrink-0">
+                              VIP 👑
+                            </span>
+                          )}
+                        </button>
+                      );
+                    })}
+                  </motion.div>
+                )}
+              </AnimatePresence>
+            </div>
+
+            {/* Studio Discovery & Preferences Capsule */}
+            <div className="flex items-center gap-1 bg-[#050914]/80 border border-white/[0.07] rounded-xl p-0.5 shrink-0">
+              {/* Mega Tools Grid Trigger Button */}
+              <button
+                onClick={() => setIsAllToolsOpen(true)}
+                className="flex items-center justify-center gap-1 h-7 px-2 bg-indigo-500/15 hover:bg-indigo-500/25 text-indigo-200 hover:text-white border border-indigo-500/30 rounded-lg transition-all font-bold text-xs shrink-0 active:scale-95 cursor-pointer whitespace-nowrap"
+                title="استعراض كافة الأدوات في نافذة سريعة ومنظمة"
+              >
+                <LayoutGrid className="w-3.5 h-3.5 text-indigo-400 shrink-0" />
+                <span className="text-[10px] px-1 rounded bg-indigo-500/30 text-indigo-100 font-mono font-bold shrink-0">
+                  {allTools.length}
+                </span>
+              </button>
+
+              {/* Search Trigger */}
+              <button
+                onClick={() => setIsSearchOpen(true)}
+                className="flex items-center justify-center gap-1 h-7 px-2 bg-white/[0.04] hover:bg-white/[0.1] border border-white/[0.06] rounded-lg transition-all text-slate-300 hover:text-white group cursor-pointer shrink-0 whitespace-nowrap"
+                title="بحث في كافة الأدوات (Ctrl + K)"
+              >
+                <Search className="w-3.5 h-3.5 text-indigo-400 group-hover:scale-110 transition-transform shrink-0" />
+                <span className="hidden xl:inline text-[10px] font-mono text-slate-400">⌘K</span>
+              </button>
+
+              {/* Smart Circle Button for Studio Dimensions, Zoom & Themes ("الدايرة الذكية") */}
+              <button
+                onClick={() => setIsThemeDimensionsModalOpen(true)}
+                className="w-7 h-7 rounded-lg transition-all duration-300 border flex items-center justify-center shrink-0 cursor-pointer relative group shadow-sm hover:scale-105 active:scale-95"
+                style={{
+                  background: activeThemeConfig?.previewGradient || 'linear-gradient(135deg, #6366f1 0%, #a855f7 100%)',
+                  borderColor: 'rgba(255, 255, 255, 0.22)'
+                }}
+                title="تخصيص أبعاد ومقاسات وتصميم الموقع وراحة العين (الدايرة الذكية) 🎨📐"
+              >
+                <span className="text-xs select-none">{activeThemeConfig?.iconSymbol || '🎨'}</span>
+                <span className="absolute -bottom-1 -start-1 text-[7px] font-black bg-black/85 px-1 rounded text-white font-mono">
+                  {Math.round((zoomScale || 1) * 100)}%
+                </span>
+              </button>
+
+              {/* Pin / Auto-hide Toggle Button */}
+              <button
+                onClick={togglePin}
+                className={`w-7 h-7 rounded-lg transition-all duration-200 border flex items-center justify-center shrink-0 cursor-pointer ${
+                  isPinned 
+                    ? 'bg-indigo-600/20 text-indigo-300 border-indigo-500/35' 
+                    : 'text-slate-400 hover:text-white hover:bg-white/[0.06] border-transparent'
+                }`}
+                title={isPinned ? 'الشريط مثبت دائماً (انقر للتبديل إلى الإخفاء التلقائي)' : 'الشريط في وضع الإخفاء التلقائي (انقر لتثبيته دائماً)'}
+              >
+                {isPinned ? <Pin className="w-3.5 h-3.5 text-indigo-400" /> : <PinOff className="w-3.5 h-3.5 opacity-70" />}
+              </button>
+
+              {/* Version Indicator Badge */}
+              <button
+                onClick={() => setIsVersionModalOpen(true)}
+                className="hidden xl:flex items-center gap-1 h-7 px-2 bg-white/[0.03] hover:bg-white/[0.08] border border-white/[0.06] rounded-lg transition-all group shrink-0 cursor-pointer whitespace-nowrap"
+                title="معلومات الإصدار وتحديثات النظام"
+              >
+                <span className="text-[10px] font-mono font-bold text-slate-300 group-hover:text-white dir-ltr shrink-0">
+                  {CURRENT_APP_VERSION}
+                </span>
+              </button>
+
+              {/* Language Switcher Dropdown */}
+              <div className="relative shrink-0" ref={langMenuRef}>
+                <button
+                  onClick={() => setIsLangMenuOpen(prev => !prev)}
+                  className={`h-7 px-2 rounded-lg transition-all duration-200 border flex items-center gap-1 cursor-pointer shrink-0 whitespace-nowrap ${
+                    isLangMenuOpen 
+                      ? 'bg-indigo-600/25 text-white border-indigo-400/50' 
+                      : 'text-slate-300 hover:text-white bg-white/[0.03] hover:bg-white/[0.08] border-white/[0.06]'
+                  }`}
+                  title="تغيير لغة الموقع / Change Language"
+                >
+                  <Globe className="w-3.5 h-3.5 text-indigo-400 shrink-0" />
+                  <span className="text-[10px] font-bold uppercase hidden xl:inline shrink-0">
+                    {language}
+                  </span>
+                  <ChevronDown className={`w-2.5 h-2.5 text-slate-400 transition-transform shrink-0 ${isLangMenuOpen ? 'rotate-180' : ''}`} />
+                </button>
+
+                <AnimatePresence>
+                  {isLangMenuOpen && (
+                    <motion.div
+                      initial={{ opacity: 0, y: 8, scale: 0.96 }}
+                      animate={{ opacity: 1, y: 0, scale: 1 }}
+                      exit={{ opacity: 0, y: 8, scale: 0.96 }}
+                      transition={{ duration: 0.15 }}
+                      className="absolute top-full mt-2 end-0 w-52 bg-[#0c1222]/95 backdrop-blur-2xl border border-white/10 rounded-2xl shadow-2xl p-2 z-[1100] flex flex-col gap-1 text-start"
+                    >
+                      <div className="px-3 py-1.5 text-[10px] font-bold text-slate-400 border-b border-white/10 flex items-center justify-between">
+                        <span>لغة الموقع / Language</span>
+                        <span className="text-indigo-400 font-mono">7 Languages</span>
+                      </div>
+                      {SUPPORTED_LANGUAGES.map(item => {
+                        const isSelected = language === item.code;
+                        return (
+                          <button
+                            key={item.code}
+                            onClick={() => {
+                              setLanguage(item.code as any);
+                              setIsLangMenuOpen(false);
+                            }}
+                            className={`w-full flex items-center justify-between px-3 py-2 rounded-xl text-xs font-bold transition-all cursor-pointer ${
+                              isSelected 
+                                ? 'bg-indigo-600 text-white shadow-md shadow-indigo-600/40' 
+                                : 'text-slate-300 hover:text-white hover:bg-white/10'
+                            }`}
+                          >
+                            <span className="flex items-center gap-2">
+                              <span className="text-base leading-none">{item.flag}</span>
+                              <span>{item.nativeName}</span>
+                            </span>
+                            {isSelected && <Check className="w-3.5 h-3.5 text-white" />}
+                          </button>
+                        );
+                      })}
+                    </motion.div>
+                  )}
+                </AnimatePresence>
+              </div>
+            </div>
+
+            {/* VIB/VIP Section Independent Button */}
+            <button 
+              type="button"
+              onClick={props.onVipClick}
+              className={`flex items-center gap-1.5 h-8 px-2.5 rounded-xl border select-none shrink-0 transition-all duration-200 font-bold text-xs cursor-pointer ${
+                (props.currentUser?.isVIP || props.currentUser?.role === 'admin' || props.currentUser?.isSuperAdmin)
+                  ? 'bg-amber-500/15 border-amber-400/40 text-amber-300 hover:bg-amber-500/25'
+                  : 'bg-amber-500/10 border-amber-500/30 hover:border-amber-400 text-amber-200 hover:text-white'
               }`}
-              title="لوحة الإدارة / Admin Panel"
+              title="باقة VIB الملكية - الميزات والاشتراك 👑"
             >
-              <Settings className="w-4 h-4 shrink-0" />
+              <Crown className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+              <span className="hidden sm:inline whitespace-nowrap">باقة VIB</span>
+            </button>
+
+            {/* Expiring Soon Alert Badge in Header */}
+            {headerSubInfo?.isExpiringSoon && (
+              <button
+                onClick={props.onProfileClick}
+                className="hidden sm:flex items-center gap-1 h-8 px-2 rounded-xl bg-amber-500/20 border border-amber-500/40 text-amber-300 text-xs font-black cursor-pointer shrink-0 hover:bg-amber-500/30 transition-all"
+                title={`تنبيه: اقترب انتهاء الاشتراك (${headerSubInfo.formattedRemaining}) - انقر للتجديد`}
+              >
+                <AlertTriangle className="w-3.5 h-3.5 text-amber-400" />
+                <span className="hidden md:inline">{headerSubInfo.formattedRemaining}</span>
+              </button>
+            )}
+
+            {/* Expired Warning Badge in Header */}
+            {headerSubInfo?.isExpired && (
+              <button
+                onClick={props.onProfileClick}
+                className="hidden sm:flex items-center gap-1 h-8 px-2 rounded-xl bg-rose-500/20 border border-rose-500/40 text-rose-300 text-xs font-black cursor-pointer shrink-0 hover:bg-rose-500/30 transition-all"
+                title="الاشتراك منتهي - انقر للتجديد"
+              >
+                <AlertCircle className="w-3.5 h-3.5 text-rose-400" />
+                <span className="hidden md:inline">الاشتراك منتهي</span>
+              </button>
+            )}
+
+            {/* Account & Session Capsule */}
+            <div className="flex items-center gap-1 bg-[#050914]/80 border border-white/[0.07] rounded-xl p-0.5 shrink-0">
+              {!props.currentUser ? (
+                <button
+                  type="button"
+                  onClick={props.onLoginClick}
+                  className="flex items-center gap-1.5 h-7 px-2.5 rounded-lg bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-500 hover:to-purple-500 text-white font-bold text-xs cursor-pointer shadow-sm transition-all shrink-0"
+                  title="تسجيل الدخول أو إنشاء حساب جديد 🔐"
+                >
+                  <User className="w-3.5 h-3.5 shrink-0" />
+                  <span>دخول</span>
+                </button>
+              ) : (
+                <button
+                  onClick={props.onProfileClick}
+                  className="flex items-center gap-1.5 h-7 px-2 rounded-lg bg-white/[0.04] hover:bg-white/[0.1] border border-white/[0.06] transition-all cursor-pointer group shrink-0 whitespace-nowrap"
+                  title="الملف الشخصي وتفاصيل الاشتراك وتاريخ الانتهاء"
+                >
+                  {props.currentUser.photoURL ? (
+                    <img 
+                      src={props.currentUser.photoURL} 
+                      alt={props.currentUser.name || 'حسابي'} 
+                      className="w-5 h-5 rounded-md object-cover border border-white/20 shrink-0"
+                    />
+                  ) : (
+                    <div className="w-5 h-5 rounded-md bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center text-[10px] font-black text-white shrink-0">
+                      {(props.currentUser.name || props.currentUser.email || 'U')[0].toUpperCase()}
+                    </div>
+                  )}
+                  <div className="hidden xl:flex flex-col text-right shrink-0">
+                    <span className="text-[10px] font-bold text-slate-200 group-hover:text-white max-w-[75px] truncate leading-tight whitespace-nowrap">
+                      {props.currentUser.name || 'حسابي'}
+                    </span>
+                    <span className={`text-[8px] font-black leading-none whitespace-nowrap ${
+                      headerSubInfo?.isExpired 
+                        ? 'text-rose-400' 
+                        : headerSubInfo?.isExpiringSoon 
+                        ? 'text-amber-400' 
+                        : headerSubInfo?.isActive 
+                        ? 'text-emerald-400' 
+                        : 'text-slate-400'
+                    }`}>
+                      {headerSubInfo?.statusLabelAr || 'عضو'}
+                    </span>
+                  </div>
+                </button>
+              )}
+
+              {props.isAdmin && (
+                <button
+                  onClick={props.onAdminToggle}
+                  className={`w-7 h-7 rounded-lg transition-all duration-200 border flex items-center justify-center shrink-0 cursor-pointer ${
+                    props.isAdminOpen 
+                      ? 'bg-amber-500/20 text-amber-300 border-amber-500/40' 
+                      : 'text-slate-400 hover:text-white hover:bg-white/[0.08] border-transparent'
+                  }`}
+                  title="لوحة الإدارة / Admin Panel"
+                >
+                  <Settings className="w-3.5 h-3.5 shrink-0" />
+                </button>
+              )}
+
+              <button
+                onClick={props.onLogout}
+                className="w-7 h-7 rounded-lg text-slate-400 hover:text-rose-400 hover:bg-rose-500/15 border border-transparent hover:border-rose-500/25 transition-all duration-200 flex items-center justify-center shrink-0 cursor-pointer"
+                title="تسجيل الخروج"
+              >
+                <LogOut className="w-3.5 h-3.5 shrink-0" />
+              </button>
+            </div>
+
+            {/* Mobile Menu Trigger */}
+            <button 
+              onClick={() => setIsMobileMenuOpen(true)}
+              className="lg:hidden w-8 h-8 bg-indigo-600/20 text-indigo-300 hover:bg-indigo-600/30 border border-indigo-500/30 rounded-xl flex items-center justify-center transition-all cursor-pointer shrink-0"
+              title="القائمة"
+            >
+              <Menu className="w-4 h-4 shrink-0" />
+            </button>
+          </div>
+        </div>
+
+        {/* === TIER 2: Full-Width Dedicated Studio Tools Ribbon (100% Width for Easy Left/Right Movement) === */}
+        <div className="flex items-center w-full min-w-0 bg-[#050914]/85 border border-white/[0.07] rounded-xl p-1 gap-1.5 shadow-inner">
+          {/* Scroll Right Button (تحريك الشريط لليمين بسهولة) */}
+          {!isRibbonExpanded && (
+            <button
+              type="button"
+              id="nav-scroll-right-btn"
+              onClick={() => handleNavScroll('right')}
+              onMouseDown={() => startContinuousScroll('right')}
+              onMouseUp={stopContinuousScroll}
+              onMouseLeave={stopContinuousScroll}
+              className="w-8 h-8 rounded-lg bg-slate-900/95 hover:bg-indigo-600 text-slate-200 hover:text-white border border-white/10 hover:border-indigo-400/60 shadow-sm transition-all shrink-0 flex items-center justify-center active:scale-95 cursor-pointer group"
+              title="تحريك شريط الأدوات لليمين (اضغط مطولاً للتمرير السريع)"
+              aria-label="تحريك شريط الأدوات لليمين"
+            >
+              <ChevronRight className="w-4 h-4 shrink-0 transition-transform group-hover:translate-x-0.5" />
             </button>
           )}
 
-          <button
-            onClick={props.onLogout}
-            className="w-9 h-9 md:w-10 md:h-10 rounded-xl text-slate-400 hover:text-rose-400 hover:bg-rose-500/10 border border-white/[0.08] hover:border-rose-500/25 transition-all duration-300 flex items-center justify-center shrink-0 cursor-pointer"
-            title="تسجيل الخروج"
+          {/* Inline Tools <nav> (Never unmounts on state changes, preserving scroll position!) */}
+          <nav 
+            ref={scrollRef} 
+            onWheel={handleNavWheel}
+            onMouseDown={handleNavMouseDown}
+            onMouseMove={handleNavMouseMove}
+            onMouseUp={handleNavMouseUp}
+            onMouseLeave={handleNavMouseUp}
+            className={`flex items-center gap-1.5 text-xs font-bold flex-1 min-w-0 px-1 select-none ${
+              isRibbonExpanded
+                ? 'flex-wrap overflow-y-auto max-h-[160px] py-1 custom-scrollbar'
+                : `overflow-x-auto no-scrollbar whitespace-nowrap scroll-smooth ${
+                    isNavDragging ? 'cursor-grabbing' : 'cursor-grab'
+                  }`
+            }`} 
           >
-            <LogOut className="w-4 h-4 shrink-0" />
-          </button>
+            <div className={`flex items-center gap-1.5 ${isRibbonExpanded ? 'flex-wrap w-full' : 'shrink-0'}`}>
+              {filteredRibbonStarredTools.map((tool) => renderNavToolButton(tool, true))}
+              {filteredRibbonStarredTools.length > 0 && filteredRibbonUnstarredTools.length > 0 && !isRibbonExpanded && (
+                <div className="w-px h-5 bg-white/15 shrink-0 mx-0.5" />
+              )}
+              {filteredRibbonUnstarredTools.map((tool) => renderNavToolButton(tool, isStarred(tool.id)))}
+            </div>
+          </nav>
 
-          {/* Mobile Menu Trigger */}
-          <button 
-            onClick={() => setIsMobileMenuOpen(true)}
-            className="lg:hidden w-9 h-9 md:w-10 md:h-10 bg-indigo-600/20 text-indigo-300 hover:bg-indigo-600/30 border border-indigo-500/30 rounded-xl flex items-center justify-center transition-all cursor-pointer shrink-0"
-            title="القائمة"
+          {/* Scroll Left Button (تحريك الشريط لليسار بسهولة) */}
+          {!isRibbonExpanded && (
+            <button
+              type="button"
+              id="nav-scroll-left-btn"
+              onClick={() => handleNavScroll('left')}
+              onMouseDown={() => startContinuousScroll('left')}
+              onMouseUp={stopContinuousScroll}
+              onMouseLeave={stopContinuousScroll}
+              className="w-8 h-8 rounded-lg bg-slate-900/95 hover:bg-indigo-600 text-slate-200 hover:text-white border border-white/10 hover:border-indigo-400/60 shadow-sm transition-all shrink-0 flex items-center justify-center active:scale-95 cursor-pointer group"
+              title="تحريك شريط الأدوات لليسار (اضغط مطولاً للتمرير السريع)"
+              aria-label="تحريك شريط الأدوات لليسار"
+            >
+              <ChevronLeft className="w-4 h-4 shrink-0 transition-transform group-hover:-translate-x-0.5" />
+            </button>
+          )}
+
+          {/* Expand / Collapse All Tools Ribbon Toggle (فرد كل الأزرار بدون تمرير) */}
+          <button
+            type="button"
+            id="nav-expand-all-btn"
+            onClick={toggleRibbonExpanded}
+            className={`h-8 px-2.5 rounded-lg border flex items-center gap-1 text-[11px] font-bold transition-all cursor-pointer shrink-0 ${
+              isRibbonExpanded
+                ? 'bg-indigo-600 text-white border-indigo-400 shadow-sm'
+                : 'bg-slate-900/95 hover:bg-indigo-600/30 text-indigo-200 hover:text-white border-indigo-500/30'
+            }`}
+            title={isRibbonExpanded ? 'طي الشريط في سطر واحد' : 'فرد وعرض جميع الأزرار أمامك بدون تحريك يمين أو يسار'}
           >
-            <Menu className="w-4 h-4 shrink-0" />
+            {isRibbonExpanded ? (
+              <>
+                <ChevronUp className="w-3.5 h-3.5 text-white shrink-0" />
+                <span>طي الشريط</span>
+              </>
+            ) : (
+              <>
+                <ChevronDown className="w-3.5 h-3.5 text-indigo-400 shrink-0" />
+                <span>فرد الكل</span>
+              </>
+            )}
           </button>
         </div>
       </header>

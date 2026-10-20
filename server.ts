@@ -236,12 +236,17 @@ async function startServer() {
         '.aistudio',
         'uploads',
         '.next',
-        '.cache'
+        '.cache',
+        'dev-dist',
+        'aistudio',
+        '.tempmediaStorage'
       ]);
       const excludedFiles = new Set([
         'bun.lock',
         'package-lock.json',
-        '.DS_Store'
+        '.DS_Store',
+        'test_comp.png',
+        'vip_opt.png'
       ]);
 
       const addDirToZip = (dirPath: string, zipFolder: JSZip) => {
