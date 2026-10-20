@@ -155,8 +155,19 @@ export const Header: React.FC<HeaderProps> = (props) => {
     return true; // Default to pinned so navigation is always visible on all devices
   });
   const hideTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const suppressHoverRef = useRef<boolean>(false);
 
   const handleMouseEnterHeader = () => {
+    if (suppressHoverRef.current) return;
+    if (hideTimerRef.current) {
+      clearTimeout(hideTimerRef.current);
+      hideTimerRef.current = null;
+    }
+    setIsHovered(true);
+  };
+
+  const handleRevealFromTopTrigger = () => {
+    suppressHoverRef.current = false;
     if (hideTimerRef.current) {
       clearTimeout(hideTimerRef.current);
       hideTimerRef.current = null;
@@ -171,14 +182,32 @@ export const Header: React.FC<HeaderProps> = (props) => {
     }, 350);
   };
 
-  const togglePin = () => {
+  const togglePin = (e?: React.MouseEvent) => {
+    if (e) e.stopPropagation();
     const next = !isPinned;
     setIsPinned(next);
     localStorage.setItem('header_pinned', String(next));
+    if (hideTimerRef.current) {
+      clearTimeout(hideTimerRef.current);
+      hideTimerRef.current = null;
+    }
+    if (!next) {
+      // Immediately hide the entire header when unpinned
+      suppressHoverRef.current = true;
+      setIsHovered(false);
+      setIsMoreToolsOpen(false);
+      setIsLangMenuOpen(false);
+      setTimeout(() => {
+        suppressHoverRef.current = false;
+      }, 600);
+    } else {
+      suppressHoverRef.current = false;
+      setIsHovered(true);
+    }
   };
 
-  // Always fixed and visible across all features as requested by user
-  const isHeaderVisible = true;
+  // Visible when pinned, or when hovered/triggered in auto-hide mode
+  const isHeaderVisible = isPinned || isHovered || isSearchOpen || isAllToolsOpen;
 
   const searchInputRef = useRef<HTMLInputElement>(null);
 
@@ -630,19 +659,19 @@ export const Header: React.FC<HeaderProps> = (props) => {
       </AnimatePresence>
 
       {/* Invisible Top Hover Zone - reveals header when mouse moves to very top of window */}
-      {!isPinned && (
+      {!isPinned && !isHeaderVisible && (
         <div 
-          onMouseEnter={handleMouseEnterHeader}
-          className="fixed top-0 left-0 right-0 h-3 z-[999] pointer-events-auto"
+          onMouseEnter={handleRevealFromTopTrigger}
+          className="fixed top-0 left-0 right-0 h-3 z-[3501] pointer-events-auto"
         />
       )}
 
       {/* Floating Trigger Notch / Pill - appears when header is auto-hidden */}
       {!isPinned && !isHeaderVisible && (
         <div 
-          onMouseEnter={handleMouseEnterHeader}
-          onClick={handleMouseEnterHeader}
-          className="fixed top-1.5 left-1/2 -translate-x-1/2 z-[1001] cursor-pointer group flex items-center gap-2 bg-slate-950/85 hover:bg-[#0f172a]/95 border border-indigo-500/30 hover:border-indigo-400/60 shadow-[0_4px_20px_rgba(0,0,0,0.6)] backdrop-blur-xl px-3.5 py-1.5 rounded-full transition-all duration-300 hover:scale-105 select-none"
+          onMouseEnter={handleRevealFromTopTrigger}
+          onClick={handleRevealFromTopTrigger}
+          className="fixed top-1.5 left-1/2 -translate-x-1/2 z-[3502] cursor-pointer group flex items-center gap-2 bg-slate-950/90 hover:bg-[#0f172a] border border-indigo-500/35 hover:border-indigo-400/70 shadow-[0_4px_20px_rgba(0,0,0,0.75)] backdrop-blur-xl px-3.5 py-1.5 rounded-full transition-all duration-300 hover:scale-105 select-none"
         >
           <div className="w-2 h-2 rounded-full bg-indigo-400 animate-pulse shadow-[0_0_8px_#818cf8]" />
           <span className="text-[11px] font-bold text-slate-300 group-hover:text-white">شريط الأدوات</span>

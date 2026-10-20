@@ -68,7 +68,12 @@ export default defineConfig(({ mode }) => {
           'react-dom/client',
           'react/jsx-runtime',
           'react/jsx-dev-runtime',
-          'lucide-react'
+          'lucide-react',
+          'protobufjs',
+          'pako',
+          'jszip',
+          'fflate',
+          'motion/react'
         ]
       },
       esbuild: {
