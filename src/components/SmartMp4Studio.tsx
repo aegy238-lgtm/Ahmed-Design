@@ -66,6 +66,9 @@ import {
   loadSmartMp4ProjectsHistory,
   deleteSmartMp4Project,
 } from '../services/smartMp4ProjectService';
+import { parseSvgaToProject } from './SvgaLayerEditor/svgaParserEngine';
+import { renderAllProjectFrames } from './SvgaLayerEditor/svgaProjectRenderer';
+import { exportEditedSvga, SvgaCompressionOptions } from './SvgaLayerEditor/svgaExportEngine';
 
 interface QueuedVideoItem {
   id: string;
@@ -79,6 +82,10 @@ interface QueuedVideoItem {
   height: number;
   duration: number;
   fps: number;
+  isSvga?: boolean;
+  svgaProject?: any;
+  svgaLayers?: any[];
+  svgaCanvases?: HTMLCanvasElement[];
 }
 
 type StudioTab =
@@ -179,6 +186,39 @@ export const SmartMp4Studio: React.FC<SmartMp4StudioProps> = ({
   const prevAlphaRef = useRef<Uint8ClampedArray | null>(null);
   const rafRef = useRef<number | null>(null);
 
+  // Persistent Offscreen Buffer Canvas Refs (prevents garbage collection churn during 60fps playback)
+  const offCanvasSourceRef = useRef<HTMLCanvasElement | null>(null);
+  const offCanvasProcessedRef = useRef<HTMLCanvasElement | null>(null);
+  const offCanvasMaskRef = useRef<HTMLCanvasElement | null>(null);
+
+  // Playback state refs for high-frequency synchronization without triggering React re-renders every frame
+  const currentTimeRef = useRef<number>(currentTime);
+  const isPlayingRef = useRef<boolean>(isPlaying);
+  const lastUiSyncRef = useRef<number>(0);
+
+  useEffect(() => {
+    currentTimeRef.current = currentTime;
+  }, [currentTime]);
+
+  useEffect(() => {
+    isPlayingRef.current = isPlaying;
+  }, [isPlaying]);
+
+  const getOffscreenCanvas = (
+    ref: React.MutableRefObject<HTMLCanvasElement | null>,
+    width: number,
+    height: number
+  ): HTMLCanvasElement => {
+    if (!ref.current) {
+      ref.current = document.createElement('canvas');
+    }
+    if (ref.current.width !== width || ref.current.height !== height) {
+      ref.current.width = width;
+      ref.current.height = height;
+    }
+    return ref.current;
+  };
+
   const activeQueueItem = videoQueue.find((q) => q.id === activeQueueId) || null;
   const selectedElement = elements.find((e) => e.id === selectedElementId) || elements[0] || null;
   const currentFrameIndex = Math.max(0, Math.round((currentTime - trimStart) * (sourceFps || 24)));
@@ -194,7 +234,7 @@ export const SmartMp4Studio: React.FC<SmartMp4StudioProps> = ({
     refreshHistory();
   }, [refreshHistory]);
 
-  // Enqueue and chunk-ingest uploaded files without mutating original files
+  // Enqueue and chunk-ingest uploaded files without mutating original files (supports MP4 & SVGA)
   const handleFilesSelected = useCallback(
     async (filesList: File[]) => {
       if (!filesList || filesList.length === 0) return;
@@ -206,6 +246,9 @@ export const SmartMp4Studio: React.FC<SmartMp4StudioProps> = ({
           name.endsWith('.webm') ||
           name.endsWith('.mov') ||
           name.endsWith('.avi') ||
+          name.endsWith('.svga') ||
+          name.endsWith('.vap') ||
+          name.endsWith('.pag') ||
           f.type.startsWith('video/')
         );
       });
@@ -215,46 +258,170 @@ export const SmartMp4Studio: React.FC<SmartMp4StudioProps> = ({
           active: false,
           phase: '',
           percent: 0,
-          error: 'يرجى اختيار ملف فيديو صالح بصيغة MP4 أو WebM أو MOV.',
+          error: 'يرجى اختيار ملف مدعوم بصيغة MP4 أو WebM أو MOV أو SVGA.',
         });
         return;
       }
 
-      const newItems: QueuedVideoItem[] = validFiles.map((file, idx) => ({
-        id: `vid_${Date.now()}_${idx}`,
-        file,
-        name: file.name,
-        sizeBytes: file.size,
-        url: URL.createObjectURL(file),
-        status: 'ingesting',
-        ingestProgress: 0,
-        width: 960,
-        height: 540,
-        duration: 0,
-        fps: 24,
-      }));
+      for (let idx = 0; idx < validFiles.length; idx++) {
+        const file = validFiles[idx];
+        const nameLower = file.name.toLowerCase();
+        const isSvga = nameLower.endsWith('.svga') || nameLower.endsWith('.vap') || nameLower.endsWith('.pag');
 
-      setVideoQueue((prev) => [...prev, ...newItems]);
-      if (!activeQueueId && newItems.length > 0) {
-        setActiveQueueId(newItems[0].id);
-      }
-
-      // Chunked ingestion into IndexedDB for each queued video
-      for (const item of newItems) {
-        try {
-          await ingestVideoFileChunked(item.file, item.id, (loaded, total) => {
-            const pct = Math.round((loaded / Math.max(1, total)) * 100);
-            setVideoQueue((prev) =>
-              prev.map((q) => (q.id === item.id ? { ...q, ingestProgress: pct } : q))
-            );
+        if (isSvga) {
+          setTaskState({
+            active: true,
+            phase: `جاري فك تشفير وتحليل ملف SVGA: ${file.name}...`,
+            percent: 15,
+            error: null,
           });
-          setVideoQueue((prev) =>
-            prev.map((q) => (q.id === item.id ? { ...q, status: 'ready', ingestProgress: 100 } : q))
-          );
-        } catch {
-          setVideoQueue((prev) =>
-            prev.map((q) => (q.id === item.id ? { ...q, status: 'ready', ingestProgress: 100 } : q))
-          );
+
+          try {
+            const { project, layers } = await parseSvgaToProject(file);
+            const totalF = Math.max(1, project.totalFrames || 1);
+            const fps = project.fps || 24;
+            const dur = Number((totalF / fps).toFixed(2));
+            const vw = project.width || 960;
+            const vh = project.height || 540;
+
+            const { canvases } = await renderAllProjectFrames(project, layers, {
+              onProgress: (pct, curr, total) => {
+                setTaskState({
+                  active: true,
+                  phase: `جاري معالجة إطارات ملف SVGA (${curr}/${total})...`,
+                  percent: Math.round(15 + (pct * 0.7)),
+                  error: null,
+                });
+              },
+            });
+
+            // Primary element #1: Full Scene Combined (All layers in original positions)
+            const fullSceneElement: DetectedVideoElement = {
+              id: `svga_full_scene_${Date.now()}`,
+              index: 1,
+              name: `الملف المدمج بالكامل (${layers.length} طبقات في مواقعها الأصليّة)`,
+              category: 'character',
+              categoryLabelAr: 'مشهد مدمج كامل',
+              thumbnailDataUrl: layers[0]?.thumbnailUrl || '',
+              bounds: { x: 0, y: 0, width: vw, height: vh },
+              motionBounds: { x: 0, y: 0, width: vw, height: vh },
+              frameBBoxes: {},
+              areaPercent: 100,
+              frameCount: totalF,
+              durationSec: dur,
+              estimatedSizeKb: Math.round(file.size / 1024),
+              visible: true,
+              locked: false,
+              customPadding: 0,
+              cropMode: 'scene',
+              isFullScene: true,
+              maskWidth: vw,
+              maskHeight: vh,
+            };
+
+            const layerElements: DetectedVideoElement[] = layers.map((layer, lIdx) => {
+              const b = layer.initialBounds || { x: 0, y: 0, width: vw, height: vh };
+              return {
+                id: `svga_el_${lIdx}_${Date.now()}`,
+                index: lIdx + 2,
+                name: layer.name || `طبقة SVGA #${lIdx + 1}`,
+                category: 'character',
+                categoryLabelAr: 'طبقة منفصلة',
+                thumbnailDataUrl: layer.thumbnailUrl || '',
+                bounds: { x: Math.round(b.x || 0), y: Math.round(b.y || 0), width: Math.max(10, Math.round(b.width || vw)), height: Math.max(10, Math.round(b.height || vh)) },
+                motionBounds: { x: Math.round(b.x || 0), y: Math.round(b.y || 0), width: Math.max(10, Math.round(b.width || vw)), height: Math.max(10, Math.round(b.height || vh)) },
+                frameBBoxes: {},
+                areaPercent: Math.round(((b.width * b.height) / (vw * vh)) * 100) || 20,
+                frameCount: totalF,
+                durationSec: dur,
+                estimatedSizeKb: Math.round(file.size / 1024),
+                visible: layer.visible !== false,
+                locked: layer.locked === true,
+                customPadding: 8,
+                cropMode: 'tight',
+                manualMask: undefined,
+                maskWidth: Math.max(10, Math.round(b.width || vw)),
+                maskHeight: Math.max(10, Math.round(b.height || vh)),
+              };
+            });
+
+            const autoSvgaElements = [fullSceneElement, ...layerElements];
+
+            const newItem: QueuedVideoItem = {
+              id: `svga_${Date.now()}_${idx}`,
+              file,
+              name: file.name,
+              sizeBytes: file.size,
+              url: URL.createObjectURL(file),
+              status: 'ready',
+              ingestProgress: 100,
+              width: vw,
+              height: vh,
+              duration: dur,
+              fps,
+              isSvga: true,
+              svgaProject: project,
+              svgaLayers: layers,
+              svgaCanvases: canvases,
+            };
+
+            setVideoQueue((prev) => [...prev, newItem]);
+            setActiveQueueId(newItem.id);
+            setVideoWidth(vw);
+            setVideoHeight(vh);
+            setDuration(dur);
+            setSourceFps(fps);
+            setTrimStart(0);
+            setTrimEnd(dur);
+            setCurrentTime(0);
+            if (autoSvgaElements.length > 0) {
+              setElements(autoSvgaElements);
+              setSelectedElementId(autoSvgaElements[0].id);
+            }
+            setTaskState({ active: false, phase: '', percent: 100, error: null });
+          } catch (svgaErr: any) {
+            console.error("SVGA parse error in SmartMp4Studio:", svgaErr);
+            setTaskState({
+              active: false,
+              phase: '',
+              percent: 0,
+              error: `تعذر قراءة أو فك تشفير ملف SVGA: ${svgaErr?.message || 'خطأ غير معروف'}`,
+            });
+          }
+        } else {
+          // Standard Video File processing
+          const newItem: QueuedVideoItem = {
+            id: `vid_${Date.now()}_${idx}`,
+            file,
+            name: file.name,
+            sizeBytes: file.size,
+            url: URL.createObjectURL(file),
+            status: 'ingesting',
+            ingestProgress: 0,
+            width: 960,
+            height: 540,
+            duration: 0,
+            fps: 24,
+          };
+
+          setVideoQueue((prev) => [...prev, newItem]);
+          setActiveQueueId(newItem.id);
+
+          try {
+            await ingestVideoFileChunked(newItem.file, newItem.id, (loaded, total) => {
+              const pct = Math.round((loaded / Math.max(1, total)) * 100);
+              setVideoQueue((prev) =>
+                prev.map((q) => (q.id === newItem.id ? { ...q, ingestProgress: pct } : q))
+              );
+            });
+            setVideoQueue((prev) =>
+              prev.map((q) => (q.id === newItem.id ? { ...q, status: 'ready', ingestProgress: 100 } : q))
+            );
+          } catch {
+            setVideoQueue((prev) =>
+              prev.map((q) => (q.id === newItem.id ? { ...q, status: 'ready', ingestProgress: 100 } : q))
+            );
+          }
         }
       }
     },
@@ -346,14 +513,37 @@ export const SmartMp4Studio: React.FC<SmartMp4StudioProps> = ({
     }, 120);
   };
 
-  // Real-time Frame Renderer onto displayCanvasRef
+  // Real-time Frame Renderer onto displayCanvasRef (supports MP4 video & SVGA rendered canvases)
   const renderCurrentFrameToCanvas = useCallback(() => {
-    const v = videoRef.current;
     const canvas = displayCanvasRef.current;
-    if (!v || !canvas || v.readyState < 2) return;
+    if (!canvas) return;
 
-    const vw = v.videoWidth || videoWidth || 960;
-    const vh = v.videoHeight || videoHeight || 540;
+    let offCanvas: HTMLCanvasElement | null = null;
+    const activeTime = currentTimeRef.current ?? currentTime;
+    const frameIdx = Math.max(0, Math.round((activeTime - trimStart) * (sourceFps || 24)));
+
+    if (activeQueueItem?.isSvga && activeQueueItem.svgaCanvases && activeQueueItem.svgaCanvases.length > 0) {
+      const totalF = activeQueueItem.svgaCanvases.length;
+      const fIdx = Math.min(
+        totalF - 1,
+        Math.max(0, Math.floor((activeTime - trimStart) * (sourceFps || 24)))
+      );
+      offCanvas = activeQueueItem.svgaCanvases[fIdx];
+    } else {
+      const v = videoRef.current;
+      if (!v || v.readyState < 2) return;
+      const vw = v.videoWidth || videoWidth || 960;
+      const vh = v.videoHeight || videoHeight || 540;
+
+      offCanvas = getOffscreenCanvas(offCanvasSourceRef, vw, vh);
+      const offCtx = offCanvas.getContext('2d', { willReadFrequently: true })!;
+      offCtx.drawImage(v, 0, 0, vw, vh);
+    }
+
+    if (!offCanvas) return;
+    const vw = offCanvas.width;
+    const vh = offCanvas.height;
+
     if (canvas.width !== vw || canvas.height !== vh) {
       canvas.width = vw;
       canvas.height = vh;
@@ -362,17 +552,12 @@ export const SmartMp4Studio: React.FC<SmartMp4StudioProps> = ({
     const ctx = canvas.getContext('2d', { willReadFrequently: true });
     if (!ctx) return;
 
-    // 1. Draw raw video frame to offscreen buffer
-    const offCanvas = document.createElement('canvas');
-    offCanvas.width = vw;
-    offCanvas.height = vh;
-    const offCtx = offCanvas.getContext('2d', { willReadFrequently: true })!;
-    offCtx.drawImage(v, 0, 0, vw, vh);
-
     if (viewMode === 'original') {
       ctx.clearRect(0, 0, vw, vh);
       ctx.drawImage(offCanvas, 0, 0);
     } else {
+      const offCtx = offCanvas.getContext('2d', { willReadFrequently: true });
+      if (!offCtx) return;
       const frameImgData = offCtx.getImageData(0, 0, vw, vh);
 
       // Determine if we are isolating a single selected element or showing all visible elements
@@ -382,7 +567,7 @@ export const SmartMp4Studio: React.FC<SmartMp4StudioProps> = ({
 
       if (viewMode === 'isolated' && selectedElement) {
         activeElementMask =
-          selectedElement.frameMasks?.[currentFrameIndex] || selectedElement.manualMask || null;
+          selectedElement.frameMasks?.[frameIdx] || selectedElement.manualMask || null;
         maskW = selectedElement.maskWidth;
         maskH = selectedElement.maskHeight;
       } else if (elements.length > 0) {
@@ -394,7 +579,7 @@ export const SmartMp4Studio: React.FC<SmartMp4StudioProps> = ({
           const combined = new Uint8Array(maskW * maskH);
           for (const el of elements) {
             if (!el.visible) continue;
-            const m = el.frameMasks?.[currentFrameIndex] || el.manualMask;
+            const m = el.frameMasks?.[frameIdx] || el.manualMask;
             if (m && m.length === combined.length) {
               for (let i = 0; i < combined.length; i++) {
                 if (m[i] > combined[i]) combined[i] = m[i];
@@ -414,10 +599,9 @@ export const SmartMp4Studio: React.FC<SmartMp4StudioProps> = ({
         prevAlphaRef.current
       );
 
-      const processedCanvas = document.createElement('canvas');
-      processedCanvas.width = vw;
-      processedCanvas.height = vh;
-      processedCanvas.getContext('2d')!.putImageData(frameImgData, 0, 0);
+      const processedCanvas = getOffscreenCanvas(offCanvasProcessedRef, vw, vh);
+      const pCtx = processedCanvas.getContext('2d')!;
+      pCtx.putImageData(frameImgData, 0, 0);
 
       ctx.clearRect(0, 0, vw, vh);
 
@@ -452,13 +636,11 @@ export const SmartMp4Studio: React.FC<SmartMp4StudioProps> = ({
 
       // If mask_overlay mode or Manual Mask tab is active, render semi-transparent mask tint for selected element
       if ((viewMode === 'mask_overlay' || activeTab === 'manual_mask') && selectedElement) {
-        const m = selectedElement.frameMasks?.[currentFrameIndex] || selectedElement.manualMask;
+        const m = selectedElement.frameMasks?.[frameIdx] || selectedElement.manualMask;
         const mw = selectedElement.maskWidth;
         const mh = selectedElement.maskHeight;
         if (m && mw && mh) {
-          const maskOverlayCanvas = document.createElement('canvas');
-          maskOverlayCanvas.width = mw;
-          maskOverlayCanvas.height = mh;
+          const maskOverlayCanvas = getOffscreenCanvas(offCanvasMaskRef, mw, mh);
           const mCtx = maskOverlayCanvas.getContext('2d')!;
           const mImg = mCtx.createImageData(mw, mh);
           for (let i = 0; i < m.length; i++) {
@@ -480,7 +662,7 @@ export const SmartMp4Studio: React.FC<SmartMp4StudioProps> = ({
       elements.forEach((el) => {
         if (!el.visible) return;
         const isSelected = el.id === selectedElement?.id;
-        const box = el.frameBBoxes?.[currentFrameIndex] || el.motionBounds;
+        const box = el.frameBBoxes?.[frameIdx] || el.motionBounds;
         const pad = el.customPadding || 0;
         const bx = Math.max(0, box.x - pad);
         const by = Math.max(0, box.y - pad);
@@ -548,6 +730,10 @@ export const SmartMp4Studio: React.FC<SmartMp4StudioProps> = ({
       ctx.restore();
     }
   }, [
+    activeQueueItem,
+    currentTime,
+    trimStart,
+    sourceFps,
     videoWidth,
     videoHeight,
     viewMode,
@@ -555,7 +741,6 @@ export const SmartMp4Studio: React.FC<SmartMp4StudioProps> = ({
     chroma,
     elements,
     selectedElement,
-    currentFrameIndex,
     showBoundingBoxes,
     activeTab,
     isDrawingMask,
@@ -565,31 +750,53 @@ export const SmartMp4Studio: React.FC<SmartMp4StudioProps> = ({
     maskCombineMode,
   ]);
 
-  // Playback Animation Loop
+  // Playback Animation Loop (supports MP4 video & SVGA frame sequences)
   useEffect(() => {
-    const v = videoRef.current;
-    if (!v) return;
-
-    const tick = () => {
-      if (v && !v.paused) {
-        const nowTime = v.currentTime;
-        if (trimEnd > trimStart && nowTime >= trimEnd) {
-          v.currentTime = trimStart;
+    let lastTime = performance.now();
+    const tick = (now: number) => {
+      if (isPlayingRef.current) {
+        if (activeQueueItem?.isSvga) {
+          const delta = (now - lastTime) / 1000;
+          lastTime = now;
+          let next = currentTimeRef.current + delta;
+          if (next >= (trimEnd || duration || 1)) {
+            next = trimStart;
+          }
+          currentTimeRef.current = next;
+        } else {
+          const v = videoRef.current;
+          if (v && !v.paused) {
+            const nowTime = v.currentTime;
+            if (trimEnd > trimStart && nowTime >= trimEnd) {
+              v.currentTime = trimStart;
+            }
+            currentTimeRef.current = nowTime;
+          }
         }
-        setCurrentTime((prev) => (Math.abs(prev - nowTime) > 0.03 ? nowTime : prev));
+
         renderCurrentFrameToCanvas();
+
+        // Throttle React component state updates during high-speed 60fps playback to ~12fps (80ms)
+        if (now - lastUiSyncRef.current > 80) {
+          lastUiSyncRef.current = now;
+          setCurrentTime(currentTimeRef.current);
+        }
+
         rafRef.current = requestAnimationFrame(tick);
       }
     };
 
     if (isPlaying) {
       rafRef.current = requestAnimationFrame(tick);
+    } else {
+      // Sync exact time to React state when paused
+      setCurrentTime(currentTimeRef.current);
     }
 
     return () => {
       if (rafRef.current) cancelAnimationFrame(rafRef.current);
     };
-  }, [isPlaying, trimStart, trimEnd, renderCurrentFrameToCanvas]);
+  }, [isPlaying, trimStart, trimEnd, duration, activeQueueItem, renderCurrentFrameToCanvas]);
 
   // Re-render canvas whenever settings or frame change while paused
   useEffect(() => {
@@ -599,29 +806,34 @@ export const SmartMp4Studio: React.FC<SmartMp4StudioProps> = ({
   }, [isPlaying, currentTime, chroma, elements, selectedElementId, viewMode, splitPercent, showBoundingBoxes, renderCurrentFrameToCanvas]);
 
   const togglePlay = () => {
+    if (activeQueueItem?.isSvga) {
+      setIsPlaying((prev) => !prev);
+      return;
+    }
     const v = videoRef.current;
     if (!v) return;
     if (v.paused) {
       if (v.currentTime < trimStart || v.currentTime >= trimEnd) {
         v.currentTime = trimStart;
       }
-      v.play();
+      v.play().catch(() => {});
       setIsPlaying(true);
     } else {
       v.pause();
       setIsPlaying(false);
+      setCurrentTime(currentTimeRef.current);
     }
   };
 
   const stepFrame = (deltaFrames: number) => {
-    const v = videoRef.current;
-    if (!v) return;
-    v.pause();
     setIsPlaying(false);
     const frameDur = 1 / (sourceFps || 24);
-    const nextTime = Math.max(trimStart, Math.min(trimEnd || duration, v.currentTime + deltaFrames * frameDur));
-    v.currentTime = nextTime;
+    const nextTime = Math.max(trimStart, Math.min(trimEnd || duration, currentTime + deltaFrames * frameDur));
     setCurrentTime(nextTime);
+    if (!activeQueueItem?.isSvga && videoRef.current) {
+      videoRef.current.pause();
+      videoRef.current.currentTime = nextTime;
+    }
   };
 
   // Run AI Multi-Element Detection & Segmentation
@@ -1044,12 +1256,135 @@ export const SmartMp4Studio: React.FC<SmartMp4StudioProps> = ({
     setMaskCombineMode('add');
   };
 
+  // Export Full SVGA Combined File As-Is with All Layers in Original Coordinates & Compressed
+  const handleExportFullCombinedSvga = async () => {
+    if (!activeQueueItem) return;
+
+    if (activeQueueItem.isSvga && activeQueueItem.svgaProject && activeQueueItem.svgaLayers) {
+      if (videoRef.current) {
+        videoRef.current.pause();
+      }
+      setIsPlaying(false);
+
+      setTaskState({
+        active: true,
+        phase: `جاري ضغط وتصدير ملف SVGA بالكامل (${activeQueueItem.name}) مع الحفاظ على جميع الطبقات في مواقعها الأصليّة...`,
+        percent: 15,
+        error: null,
+      });
+
+      try {
+        const compOptions: SvgaCompressionOptions = {
+          mode: compression.preset === 'light' ? 'high' : compression.preset === 'strong' ? 'low' : 'medium',
+          quality: compression.imageQuality,
+          zlibLevel: 9,
+          compressImages: true,
+          imageFormat: 'png',
+        };
+
+        setTaskState({
+          active: true,
+          phase: `جاري ضغط أصول الصور والبيانات المتجهة وتوليد ملف SVGA 2.0 المدمج...`,
+          percent: 50,
+          error: null,
+        });
+
+        const { blob, fileName } = await exportEditedSvga(
+          activeQueueItem.svgaProject,
+          activeQueueItem.svgaLayers,
+          activeQueueItem.name.replace(/\.svga$/i, '') + '_compressed.svga',
+          undefined,
+          compOptions
+        );
+
+        const origSize = activeQueueItem.sizeBytes;
+        const compSize = blob.size;
+        const savingsPercent = Math.max(0, Math.round(((origSize - compSize) / origSize) * 100));
+
+        const res: ElementExportResult = {
+          elementId: 'full_combined_svga',
+          elementName: 'الملف المدمج بالكامل (جميع الطبقات في مواضعها الأصليّة)',
+          fileName,
+          blob,
+          url: URL.createObjectURL(blob),
+          originalRawBytes: origSize,
+          compressedBytes: compSize,
+          savingsPercent,
+          deduplicatedFramesCount: 0,
+          verification: {
+            isValid: true,
+            version: '2.0',
+            viewBoxWidth: activeQueueItem.width,
+            viewBoxHeight: activeQueueItem.height,
+            fps: activeQueueItem.fps,
+            frames: Math.round(activeQueueItem.duration * activeQueueItem.fps),
+            spriteCount: activeQueueItem.svgaLayers.length,
+            uniqueImageCount: Object.keys(activeQueueItem.svgaProject.rawImages || {}).length,
+            compressedSizeBytes: compSize,
+            uncompressedSizeBytes: origSize,
+            savingsPercent,
+            warnings: [],
+          },
+        };
+
+        setExportResults((prev) => [res, ...prev.filter((r) => r.elementId !== res.elementId)]);
+        setPreviewSvgaResult(res);
+        setTaskState({ active: false, phase: '', percent: 100, error: null });
+        setActiveTab('export_svga');
+
+        if (currentUser) {
+          logActivity(currentUser, 'export_svga', `Smart MP4 Studio: Exported full compressed SVGA ${fileName} (${(compSize / 1024).toFixed(1)} KB)`);
+        }
+      } catch (err: any) {
+        console.error("Full SVGA export error:", err);
+        setTaskState({
+          active: false,
+          phase: '',
+          percent: 0,
+          error: `فشل تصدير الملف المدمج: ${err?.message || 'خطأ غير معروف'}`,
+        });
+      }
+    } else {
+      const fullEl = elements.find((e) => e.isFullScene) || {
+        id: 'full_scene_elem',
+        index: 1,
+        name: 'المشهد المدمج بالكامل',
+        category: 'character' as const,
+        categoryLabelAr: 'مشهد مدمج كامل',
+        thumbnailDataUrl: '',
+        bounds: { x: 0, y: 0, width: videoWidth, height: videoHeight },
+        motionBounds: { x: 0, y: 0, width: videoWidth, height: videoHeight },
+        frameBBoxes: {},
+        areaPercent: 100,
+        frameCount: totalTrimmedFrames,
+        durationSec: Number(Math.max(0.1, trimEnd - trimStart).toFixed(2)),
+        estimatedSizeKb: 100,
+        visible: true,
+        locked: false,
+        customPadding: 0,
+        cropMode: 'scene' as const,
+        isFullScene: true,
+        maskWidth: videoWidth,
+        maskHeight: videoHeight,
+      };
+      await handleExportSingleElementSvga({ ...fullEl, cropMode: 'scene' });
+    }
+  };
+
   // Export Single Element to SVGA 2.0
   const handleExportSingleElementSvga = async (targetEl: DetectedVideoElement) => {
-    const v = videoRef.current;
-    if (!v) return;
+    if (targetEl.isFullScene && activeQueueItem?.isSvga) {
+      return handleExportFullCombinedSvga();
+    }
 
-    v.pause();
+    const mediaSource = (activeQueueItem?.isSvga && activeQueueItem.svgaCanvases)
+      ? { videoWidth, videoHeight, width: videoWidth, height: videoHeight, duration, svgaCanvases: activeQueueItem.svgaCanvases }
+      : videoRef.current;
+    if (!mediaSource) return;
+
+    if (videoRef.current) {
+      videoRef.current.pause();
+    }
     setIsPlaying(false);
     setTaskState({
       active: true,
@@ -1060,7 +1395,7 @@ export const SmartMp4Studio: React.FC<SmartMp4StudioProps> = ({
 
     try {
       const res = await exportIsolatedElementToSvga2(
-        v,
+        mediaSource as any,
         targetEl,
         chroma,
         compression,
@@ -1091,11 +1426,15 @@ export const SmartMp4Studio: React.FC<SmartMp4StudioProps> = ({
 
   // Export All Visible Elements to SVGA 2.0 + Batch ZIP Archive
   const handleExportAllElementsBatchSvga = async () => {
-    const v = videoRef.current;
+    const mediaSource = (activeQueueItem?.isSvga && activeQueueItem.svgaCanvases)
+      ? { videoWidth, videoHeight, width: videoWidth, height: videoHeight, duration, svgaCanvases: activeQueueItem.svgaCanvases }
+      : videoRef.current;
     const visibleEls = elements.filter((e) => e.visible);
-    if (!v || visibleEls.length === 0) return;
+    if (!mediaSource || visibleEls.length === 0) return;
 
-    v.pause();
+    if (videoRef.current) {
+      videoRef.current.pause();
+    }
     setIsPlaying(false);
 
     const results: ElementExportResult[] = [];
@@ -1103,7 +1442,7 @@ export const SmartMp4Studio: React.FC<SmartMp4StudioProps> = ({
       for (let i = 0; i < visibleEls.length; i++) {
         const el = visibleEls[i];
         const res = await exportIsolatedElementToSvga2(
-          v,
+          mediaSource as any,
           el,
           chroma,
           compression,
@@ -1276,7 +1615,7 @@ export const SmartMp4Studio: React.FC<SmartMp4StudioProps> = ({
       <input
         ref={fileInputRef}
         type="file"
-        accept="video/mp4,video/webm,video/quicktime,.mp4,.webm,.mov,.avi"
+        accept="video/mp4,video/webm,video/quicktime,.mp4,.webm,.mov,.avi,.svga,.vap,.pag"
         multiple
         onChange={(e) => {
           if (e.target.files) {
@@ -1302,7 +1641,7 @@ export const SmartMp4Studio: React.FC<SmartMp4StudioProps> = ({
               Smart MP4 Studio — AI + SVGA 2.0
             </h1>
             <p className="text-xs text-slate-400">
-              فصل الشخصيات والعناصر تلقائيًا ويدويًا · إزالة الخلفية الخضراء · تصدير وضغط SVGA 2.0
+              فصل الشخصيات والعناصر تلقائيًا ويدويًا · معالجة وتحرير ملفات MP4 و SVGA · إزالة الخلفية الخضراء · تصدير وضغط SVGA 2.0
             </p>
           </div>
         </div>
@@ -1314,7 +1653,7 @@ export const SmartMp4Studio: React.FC<SmartMp4StudioProps> = ({
             className="px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-100 text-xs font-bold flex items-center gap-1.5 border border-slate-700 transition-colors cursor-pointer whitespace-nowrap shrink-0"
           >
             <Upload className="w-3.5 h-3.5 text-sky-400" />
-            <span>رفع فيديو MP4</span>
+            <span>رفع فيديو MP4 أو ملف SVGA</span>
           </button>
 
           <button
@@ -2258,12 +2597,40 @@ export const SmartMp4Studio: React.FC<SmartMp4StudioProps> = ({
                   <button
                     onClick={handleExportAllElementsBatchSvga}
                     disabled={taskState.active}
-                    className="px-3 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold flex items-center gap-1.5 cursor-pointer shrink-0"
+                    className="px-3 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-bold flex items-center gap-1.5 cursor-pointer shrink-0 border border-slate-700"
                   >
                     <FolderArchive className="w-3.5 h-3.5" />
-                    <span>تصدير الكل دفعة واحدة</span>
+                    <span>تصدير طبقات منفصلة ZIP</span>
                   </button>
                 )}
+              </div>
+
+              {/* Full Scene / Combined File Compression Export Callout */}
+              <div className="p-3.5 rounded-xl bg-gradient-to-r from-emerald-950/80 via-indigo-950/80 to-slate-900 border border-emerald-500/60 shadow-lg space-y-2">
+                <div className="flex items-center justify-between gap-3 flex-wrap sm:flex-nowrap">
+                  <div className="flex items-center gap-2.5">
+                    <Sparkles className="w-5 h-5 text-emerald-400 shrink-0 animate-pulse" />
+                    <div>
+                      <div className="text-xs font-bold text-white flex items-center gap-1.5">
+                        <span>تصدير الملف المدمج بالكامل مع الضغط (SVGA 2.0)</span>
+                        <span className="px-2 py-0.5 rounded-md bg-emerald-500/20 text-emerald-300 text-[10px] border border-emerald-500/30">
+                          جميع الطبقات في مواقعها الأصليّة
+                        </span>
+                      </div>
+                      <div className="text-[11px] text-slate-300 mt-0.5 leading-relaxed">
+                        يتم تحسين وضغط الأصول مع الحفاظ التام على بنية ومواضع وإحداثيات كافة الطبقات دون تفكيكها إلى ملفات فرعية.
+                      </div>
+                    </div>
+                  </div>
+                  <button
+                    onClick={handleExportFullCombinedSvga}
+                    disabled={taskState.active}
+                    className="w-full sm:w-auto px-4 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white text-xs font-bold flex items-center justify-center gap-2 cursor-pointer shadow-md shrink-0 border border-emerald-400/40"
+                  >
+                    <Download className="w-4 h-4" />
+                    <span>تصدير الملف المدمج مضغوطاً</span>
+                  </button>
+                </div>
               </div>
 
               {elements.length === 0 ? (
@@ -2563,6 +2930,15 @@ export const SmartMp4Studio: React.FC<SmartMp4StudioProps> = ({
                   />
                 </label>
               </div>
+
+              <button
+                onClick={handleExportFullCombinedSvga}
+                disabled={taskState.active || !activeQueueItem}
+                className="w-full py-3 rounded-xl bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 text-white text-xs font-bold flex items-center justify-center gap-2 cursor-pointer shadow-lg border border-emerald-400/30"
+              >
+                <Sparkles className="w-4 h-4" />
+                <span>تطبيق إعدادات الضغط وتصدير الملف المدمج بالكامل (SVGA 2.0)</span>
+              </button>
             </div>
           )}
 

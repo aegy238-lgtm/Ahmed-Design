@@ -568,3 +568,71 @@ export function drawAnimatedWatermark(
 
   drawUniversalWatermarkOnCanvas(ctx, width, height, frameIndex, adaptedSettings, null);
 }
+
+export function savePermanentWatermarkText(text: string, isPinned: boolean = true) {
+  try {
+    if (typeof window !== 'undefined' && window.localStorage) {
+      if (text) {
+        localStorage.setItem('svga_permanent_watermark_text', text);
+      }
+      localStorage.setItem('svga_watermark_pinned', isPinned ? 'true' : 'false');
+    }
+  } catch (e) {}
+}
+
+export function getPermanentWatermarkText(): string {
+  try {
+    if (typeof window !== 'undefined' && window.localStorage) {
+      return localStorage.getItem('svga_permanent_watermark_text') || 'Ahmed SVGA • Ahmed SVGA';
+    }
+  } catch (e) {}
+  return 'Ahmed SVGA • Ahmed SVGA';
+}
+
+export function isWatermarkNamePinned(): boolean {
+  try {
+    if (typeof window !== 'undefined' && window.localStorage) {
+      return localStorage.getItem('svga_watermark_pinned') === 'true';
+    }
+  } catch (e) {}
+  return false;
+}
+
+export function getSavedWatermarkPresets(): string[] {
+  const pinned = getPermanentWatermarkText();
+  const defaults = ['Ahmed SVGA • Ahmed SVGA', '52gifts.cn', 'Destroy KING Designer'];
+  return Array.from(new Set([pinned, ...defaults]));
+}
+
+export function loadSavedBatchWatermarkConfig(): { enabled: boolean; text: string; style: string } {
+  const pinned = getPermanentWatermarkText();
+  try {
+    if (typeof window !== 'undefined' && window.localStorage) {
+      const raw = localStorage.getItem('svga_batch_watermark_config');
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        return {
+          enabled: parsed.enabled ?? true,
+          text: parsed.text || pinned,
+          style: parsed.style || 'gift_store_dashed',
+        };
+      }
+    }
+  } catch (e) {}
+  return { enabled: true, text: pinned, style: 'gift_store_dashed' };
+}
+
+export function saveBatchWatermarkConfig(cfg: { enabled?: boolean; text?: string; style?: string }) {
+  try {
+    if (typeof window !== 'undefined' && window.localStorage) {
+      const pinned = getPermanentWatermarkText();
+      const finalCfg = {
+        enabled: cfg.enabled ?? true,
+        text: cfg.text || pinned,
+        style: cfg.style || 'gift_store_dashed',
+      };
+      localStorage.setItem('svga_batch_watermark_config', JSON.stringify(finalCfg));
+    }
+  } catch (e) {}
+}
+

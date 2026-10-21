@@ -872,11 +872,10 @@ const App: React.FC = () => {
     }
   }, []);
 
-  const handleReset = useCallback(() => {
+  const clearTempState = useCallback(() => {
     if (fileMetadata?.fileUrl) {
       URL.revokeObjectURL(fileMetadata.fileUrl);
     }
-    setState(AppState.IDLE);
     setFileMetadata(null);
     setBatchFiles([]);
     setInitialLottieFile(null);
@@ -886,28 +885,32 @@ const App: React.FC = () => {
     setAeStudioInitialFile(null);
     setAeStudioInitialDimensions(null);
     setPendingImageFile(null);
+    setLayerEditorInitialFile(null);
+    setLayerEditorInitialProject(null);
+    setLayerEditorInitialLayers(null);
+    setUploadedPagFile(null);
+    setUniversalPlayerFile(null);
     setShowImageDimensionModal(false);
     setShowDurationSpeedModal(false);
   }, [fileMetadata]);
 
-  // Non-destructive navigation to IDLE that preserves user work and files
-  const handleCloseFeature = useCallback(() => {
+  const handleReset = useCallback(() => {
+    clearTempState();
     setState(AppState.IDLE);
-  }, []);
+  }, [clearTempState]);
 
-  // Visited states tracking for keep-alive component preservation
-  const [visitedStates, setVisitedStates] = useState<Set<AppState>>(() => new Set([AppState.IDLE]));
+  // Clean feature exit that unmounts and purges temporary files & session state
+  const handleCloseFeature = useCallback(() => {
+    clearTempState();
+    setState(AppState.IDLE);
+  }, [clearTempState]);
 
+  // Clean up temporary initial file props whenever returning to IDLE
   useEffect(() => {
-    if (state && state !== AppState.IDLE) {
-      setVisitedStates(prev => {
-        if (prev.has(state)) return prev;
-        const next = new Set(prev);
-        next.add(state);
-        return next;
-      });
+    if (state === AppState.IDLE) {
+      clearTempState();
     }
-  }, [state]);
+  }, [state, clearTempState]);
 
   const handleImageDimensionsConfirm = (result: ImageDimensionsResult) => {
     if (!pendingImageFile) return;
@@ -1531,8 +1534,8 @@ const App: React.FC = () => {
                 </div>
               </div>
             )}
-            {visitedStates.has(AppState.BATCH_COMPRESSOR) && (
-              <div className={state === AppState.BATCH_COMPRESSOR ? "w-full h-full flex-1 flex flex-col" : "hidden"}>
+            {state === AppState.BATCH_COMPRESSOR && (
+              <div className="w-full h-full flex-1 flex flex-col">
                 <ErrorBoundary fallbackTitle="حدث خطأ في ضاغط الملفات الجماعي" onReset={handleCloseFeature}>
                   <BatchCompressor 
                     onCancel={handleCloseFeature} 
@@ -1543,8 +1546,8 @@ const App: React.FC = () => {
                 </ErrorBoundary>
               </div>
             )}
-            {visitedStates.has(AppState.SVGA_BATCH_COMPRESSOR) && (
-              <div className={state === AppState.SVGA_BATCH_COMPRESSOR ? "w-full h-full flex-1 flex flex-col" : "hidden"}>
+            {state === AppState.SVGA_BATCH_COMPRESSOR && (
+              <div className="w-full h-full flex-1 flex flex-col">
                 <ErrorBoundary fallbackTitle="حدث خطأ في ضاغط دفعات SVGA و VAP" onReset={handleCloseFeature}>
                   <SvgaBatchCompressor 
                     onCancel={handleCloseFeature} 
@@ -1554,8 +1557,8 @@ const App: React.FC = () => {
                 </ErrorBoundary>
               </div>
             )}
-            {visitedStates.has(AppState.BATCH_SVGA_CONVERTER) && (
-              <div className={state === AppState.BATCH_SVGA_CONVERTER ? "w-full h-full flex-1 flex flex-col" : "hidden"}>
+            {state === AppState.BATCH_SVGA_CONVERTER && (
+              <div className="w-full h-full flex-1 flex flex-col">
                 <ErrorBoundary fallbackTitle="حدث خطأ في محول دفعات SVGA" onReset={handleCloseFeature}>
                   <Suspense fallback={<div className="text-white text-center py-20 font-black">جاري تحميل المحول الجماعي...</div>}>
                     <BatchSvgaConverter 
@@ -1570,8 +1573,8 @@ const App: React.FC = () => {
                 </ErrorBoundary>
               </div>
             )}
-            {visitedStates.has(AppState.SVGA_LAYER_EDITOR) && (
-              <div className={state === AppState.SVGA_LAYER_EDITOR ? "w-full h-full flex-1 flex flex-col" : "hidden"}>
+            {state === AppState.SVGA_LAYER_EDITOR && (
+              <div className="w-full h-full flex-1 flex flex-col">
                 <ErrorBoundary fallbackTitle="حدث خطأ في محرر طبقات SVGA" onReset={handleCloseFeature}>
                   <SvgaLayerEditor 
                     initialFile={layerEditorInitialFile || fileMetadata?.originalFile || undefined}
@@ -1590,8 +1593,8 @@ const App: React.FC = () => {
               </div>
             )}
             
-            {visitedStates.has(AppState.VIDEO_CONVERTER) && (
-              <div className={state === AppState.VIDEO_CONVERTER ? "w-full h-full flex-1 flex flex-col" : "hidden"}>
+            {state === AppState.VIDEO_CONVERTER && (
+              <div className="w-full h-full flex-1 flex flex-col">
                 <ErrorBoundary fallbackTitle="حدث خطأ في محول الفيديو" onReset={handleCloseFeature}>
                   <VideoConverter 
                     currentUser={currentUser} 
@@ -1610,8 +1613,8 @@ const App: React.FC = () => {
                 </ErrorBoundary>
               </div>
             )}
-            {visitedStates.has(AppState.UNIVERSAL_CONVERTER) && (
-              <div className={state === AppState.UNIVERSAL_CONVERTER ? "w-full h-full flex-1 flex flex-col" : "hidden"}>
+            {state === AppState.UNIVERSAL_CONVERTER && (
+              <div className="w-full h-full flex-1 flex flex-col">
                 <ErrorBoundary fallbackTitle="حدث خطأ في محول الحركة الشامل" onReset={handleCloseFeature}>
                   <UniversalMotionTools 
                     currentUser={currentUser} 
@@ -1627,8 +1630,8 @@ const App: React.FC = () => {
                 </ErrorBoundary>
               </div>
             )}
-            {visitedStates.has(AppState.IMAGE_CONVERTER) && (
-              <div className={state === AppState.IMAGE_CONVERTER ? "w-full h-full flex-1 flex flex-col" : "hidden"}>
+            {state === AppState.IMAGE_CONVERTER && (
+              <div className="w-full h-full flex-1 flex flex-col">
                 <ErrorBoundary fallbackTitle="حدث خطأ في محول الصور إلى SVGA" onReset={handleCloseFeature}>
                   <ImageToSvga 
                     currentUser={currentUser} 
@@ -1641,8 +1644,8 @@ const App: React.FC = () => {
                 </ErrorBoundary>
               </div>
             )}
-            {visitedStates.has(AppState.IMAGE_PROCESSOR) && (
-              <div className={state === AppState.IMAGE_PROCESSOR ? "w-full h-full flex-1 flex flex-col" : "hidden"}>
+            {state === AppState.IMAGE_PROCESSOR && (
+              <div className="w-full h-full flex-1 flex flex-col">
                 <ErrorBoundary fallbackTitle="حدث خطأ في معالج الصور" onReset={handleCloseFeature}>
                   <ImageProcessor 
                     currentUser={currentUser} 
@@ -1652,8 +1655,8 @@ const App: React.FC = () => {
                 </ErrorBoundary>
               </div>
             )}
-            {visitedStates.has(AppState.IMAGE_ENHANCER) && (
-              <div className={state === AppState.IMAGE_ENHANCER ? "w-full h-full flex-1 flex flex-col" : "hidden"}>
+            {state === AppState.IMAGE_ENHANCER && (
+              <div className="w-full h-full flex-1 flex flex-col">
                 <ErrorBoundary fallbackTitle="حدث خطأ في محسن الصور بالذكاء الاصطناعي" onReset={handleCloseFeature}>
                   <ImageEnhancer 
                     currentUser={currentUser} 
@@ -1663,8 +1666,8 @@ const App: React.FC = () => {
                 </ErrorBoundary>
               </div>
             )}
-            {visitedStates.has(AppState.BATCH_IMAGE_PROCESSOR) && (
-              <div className={state === AppState.BATCH_IMAGE_PROCESSOR ? "w-full h-full flex-1 flex flex-col" : "hidden"}>
+            {state === AppState.BATCH_IMAGE_PROCESSOR && (
+              <div className="w-full h-full flex-1 flex flex-col">
                 <ErrorBoundary fallbackTitle="حدث خطأ في معالج الصور الجماعي" onReset={handleCloseFeature}>
                   <BatchImageProcessor 
                     onCancel={handleCloseFeature} 
@@ -1673,8 +1676,8 @@ const App: React.FC = () => {
                 </ErrorBoundary>
               </div>
             )}
-            {visitedStates.has(AppState.IMAGE_EDITOR) && (
-              <div className={state === AppState.IMAGE_EDITOR ? "w-full h-full flex-1 flex flex-col" : "hidden"}>
+            {state === AppState.IMAGE_EDITOR && (
+              <div className="w-full h-full flex-1 flex flex-col">
                 <ErrorBoundary fallbackTitle="حدث خطأ في محرر الصور" onReset={handleCloseFeature}>
                   <ImageEditor 
                     currentUser={currentUser} 
@@ -1685,8 +1688,8 @@ const App: React.FC = () => {
                 </ErrorBoundary>
               </div>
             )}
-            {visitedStates.has(AppState.IMAGE_MATCHER) && (
-              <div className={state === AppState.IMAGE_MATCHER ? "w-full h-full flex-1 flex flex-col" : "hidden"}>
+            {state === AppState.IMAGE_MATCHER && (
+              <div className="w-full h-full flex-1 flex flex-col">
                 <ErrorBoundary fallbackTitle="حدث خطأ في مطابقة الصور" onReset={handleCloseFeature}>
                   <ImageMatcher 
                     currentUser={currentUser} 
@@ -1697,8 +1700,8 @@ const App: React.FC = () => {
                 </ErrorBoundary>
               </div>
             )}
-            {visitedStates.has(AppState.BATCH_CROPPER) && (
-              <div className={state === AppState.BATCH_CROPPER ? "w-full h-full flex-1 flex flex-col" : "hidden"}>
+            {state === AppState.BATCH_CROPPER && (
+              <div className="w-full h-full flex-1 flex flex-col">
                 <ErrorBoundary fallbackTitle="حدث خطأ في قاص الصور والمحدد الذكي" onReset={handleCloseFeature}>
                   <BatchCropper 
                     currentUser={currentUser} 
@@ -1709,8 +1712,8 @@ const App: React.FC = () => {
                 </ErrorBoundary>
               </div>
             )}
-            {visitedStates.has(AppState.NAME_3D_EDITOR) && (
-              <div className={state === AppState.NAME_3D_EDITOR ? "w-full h-full flex-1 flex flex-col" : "hidden"}>
+            {state === AppState.NAME_3D_EDITOR && (
+              <div className="w-full h-full flex-1 flex flex-col">
                 <ErrorBoundary fallbackTitle="حدث خطأ في محرر السمات ثلاثية الأبعاد" onReset={handleCloseFeature}>
                   <Name3DEditor 
                     onCancel={handleCloseFeature} 
@@ -1720,8 +1723,8 @@ const App: React.FC = () => {
                 </ErrorBoundary>
               </div>
             )}
-            {visitedStates.has(AppState.MULTI_SVGA_VIEWER) && (
-              <div className={state === AppState.MULTI_SVGA_VIEWER ? "w-full h-full flex-1 flex flex-col" : "hidden"}>
+            {state === AppState.MULTI_SVGA_VIEWER && (
+              <div className="w-full h-full flex-1 flex flex-col">
                 <ErrorBoundary fallbackTitle="حدث خطأ في عارض ومقارن SVGA المتعدد" onReset={handleCloseFeature}>
                   <MultiSvgaViewer 
                     onCancel={handleCloseFeature} 
@@ -1732,8 +1735,8 @@ const App: React.FC = () => {
                 </ErrorBoundary>
               </div>
             )}
-            {visitedStates.has(AppState.AUDIO_EXTRACTOR) && (
-              <div className={state === AppState.AUDIO_EXTRACTOR ? "w-full h-full flex-1 flex flex-col" : "hidden"}>
+            {state === AppState.AUDIO_EXTRACTOR && (
+              <div className="w-full h-full flex-1 flex flex-col">
                 <ErrorBoundary fallbackTitle="حدث خطأ في مستخرج الصوت" onReset={handleCloseFeature}>
                   <AudioExtractor 
                     currentUser={currentUser}
@@ -1743,8 +1746,8 @@ const App: React.FC = () => {
                 </ErrorBoundary>
               </div>
             )}
-            {visitedStates.has(AppState.SMART_MP4_STUDIO) && (
-              <div className={state === AppState.SMART_MP4_STUDIO ? "w-full h-full flex-1 flex flex-col" : "hidden"}>
+            {state === AppState.SMART_MP4_STUDIO && (
+              <div className="w-full h-full flex-1 flex flex-col">
                 <ErrorBoundary fallbackTitle="حدث خطأ في Smart MP4 Studio — AI + SVGA" onReset={handleCloseFeature}>
                   <SmartMp4Studio
                     currentUser={currentUser}
@@ -1754,8 +1757,8 @@ const App: React.FC = () => {
                 </ErrorBoundary>
               </div>
             )}
-            {visitedStates.has(AppState.AI_VIDEO_MATTING) && (
-              <div className={state === AppState.AI_VIDEO_MATTING ? "w-full h-full flex-1 flex flex-col" : "hidden"}>
+            {state === AppState.AI_VIDEO_MATTING && (
+              <div className="w-full h-full flex-1 flex flex-col">
                 <ErrorBoundary fallbackTitle="حدث خطأ في استوديو قص الفيديو بالذكاء الاصطناعي" onReset={handleCloseFeature}>
                   <AIVideoMattingStudio 
                     currentUser={currentUser}
@@ -1766,8 +1769,8 @@ const App: React.FC = () => {
                 </ErrorBoundary>
               </div>
             )}
-            {visitedStates.has(AppState.IMAGE_COLLAGE_STUDIO) && (
-              <div className={state === AppState.IMAGE_COLLAGE_STUDIO ? "w-full h-full flex-1 flex flex-col" : "hidden"}>
+            {state === AppState.IMAGE_COLLAGE_STUDIO && (
+              <div className="w-full h-full flex-1 flex flex-col">
                 <ErrorBoundary fallbackTitle="حدث خطأ في مجمع الصور والعلامة المائية" onReset={handleCloseFeature}>
                   <ImageCollageStudio 
                     onBack={handleCloseFeature} 
@@ -1776,15 +1779,15 @@ const App: React.FC = () => {
                 </ErrorBoundary>
               </div>
             )}
-            {visitedStates.has(AppState.ANIMATION_MANAGER) && (
-              <div className={state === AppState.ANIMATION_MANAGER ? "w-full h-full flex-1 flex flex-col" : "hidden"}>
+            {state === AppState.ANIMATION_MANAGER && (
+              <div className="w-full h-full flex-1 flex flex-col">
                 <ErrorBoundary fallbackTitle="حدث خطأ في مدير ملفات الأنميشن" onReset={handleCloseFeature}>
                   <AnimationManager onBack={handleCloseFeature} />
                 </ErrorBoundary>
               </div>
             )}
-            {visitedStates.has(AppState.STORE) && (
-              <div className={state === AppState.STORE ? "w-full h-full flex-1 flex flex-col" : "hidden"}>
+            {state === AppState.STORE && (
+              <div className="w-full h-full flex-1 flex flex-col">
                 <ErrorBoundary fallbackTitle="حدث خطأ في متجر أصول SVGA" onReset={handleCloseFeature}>
                   <Store 
                     currentUser={currentUser} 
@@ -1793,8 +1796,8 @@ const App: React.FC = () => {
                 </ErrorBoundary>
               </div>
             )}
-            {visitedStates.has(AppState.EMBEDDED_PORTAL) && (
-              <div className={state === AppState.EMBEDDED_PORTAL ? "w-full h-full flex-1 flex flex-col" : "hidden"}>
+            {state === AppState.EMBEDDED_PORTAL && (
+              <div className="w-full h-full flex-1 flex flex-col">
                 <ErrorBoundary fallbackTitle="حدث خطأ في البوابة المضمنة" onReset={handleCloseFeature}>
                   <EmbeddedPortalViewer 
                     settings={settings || undefined}
@@ -1804,15 +1807,15 @@ const App: React.FC = () => {
                 </ErrorBoundary>
               </div>
             )}
-            {visitedStates.has(AppState.VAP_HUB) && (
-              <div className={state === AppState.VAP_HUB ? "w-full h-full flex-1 flex flex-col" : "hidden"}>
+            {state === AppState.VAP_HUB && (
+              <div className="w-full h-full flex-1 flex flex-col">
                 <ErrorBoundary fallbackTitle="حدث خطأ في VAP Hub" onReset={handleCloseFeature}>
                   <VapHub />
                 </ErrorBoundary>
               </div>
             )}
-            {visitedStates.has(AppState.AFTER_EFFECTS_STUDIO) && (
-              <div className={state === AppState.AFTER_EFFECTS_STUDIO ? "w-full h-full flex-1 flex flex-col" : "hidden"}>
+            {state === AppState.AFTER_EFFECTS_STUDIO && (
+              <div className="w-full h-full flex-1 flex flex-col">
                 <ErrorBoundary fallbackTitle="حدث خطأ في تحميل استوديو ومحرر After Effects" onReset={handleCloseFeature}>
                   <AfterEffectsStudio 
                     initialFile={aeStudioInitialFile || fileMetadata?.originalFile || null}
@@ -1829,8 +1832,8 @@ const App: React.FC = () => {
                 </ErrorBoundary>
               </div>
             )}
-            {visitedStates.has(AppState.APK_EXTRACTOR) && (
-              <div className={state === AppState.APK_EXTRACTOR ? "w-full h-full flex-1 flex flex-col" : "hidden"}>
+            {state === AppState.APK_EXTRACTOR && (
+              <div className="w-full h-full flex-1 flex flex-col">
                 <ErrorBoundary fallbackTitle="حدث خطأ في تحميل مستخرج أصول التطبيقات ومشاريع السيارات" onReset={handleCloseFeature}>
                   <Suspense fallback={<Loading message="جارٍ تجهيز مستخرج أصول التطبيقات ومشاريع السيارات..." />}>
                     <ApkAssetExtractor onClose={handleCloseFeature} />
@@ -1838,8 +1841,8 @@ const App: React.FC = () => {
                 </ErrorBoundary>
               </div>
             )}
-            {visitedStates.has(AppState.VIDEO_DURATION_SPEED) && (
-              <div className={state === AppState.VIDEO_DURATION_SPEED ? "w-full h-full flex-1 flex flex-col" : "hidden"}>
+            {state === AppState.VIDEO_DURATION_SPEED && (
+              <div className="w-full h-full flex-1 flex flex-col">
                 <ErrorBoundary fallbackTitle="حدث خطأ في أداة التحكم في سرعة ومدة الفيديو" onReset={handleCloseFeature}>
                   <VideoDurationSpeedModal
                     isOpen={state === AppState.VIDEO_DURATION_SPEED || showDurationSpeedModal}

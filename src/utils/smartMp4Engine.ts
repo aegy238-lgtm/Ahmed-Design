@@ -33,6 +33,7 @@ export interface DetectedVideoElement {
   overlapMessage?: string;
   customPadding: number; // Extra crop margin in pixels
   cropMode: 'tight' | 'scene'; // tight = crop to element bounds, scene = preserve full scene coordinates
+  isFullScene?: boolean; // True if element represents the combined full scene/file
   // Optional manual mask overrides (stored at analysis grid resolution: maskW x maskH)
   manualMask?: Uint8Array;
   maskWidth?: number;
@@ -1299,7 +1300,7 @@ export async function verifySvga2Binary(
  * Preserves full frame-by-frame motion, alpha transparency, chroma despill, and coordinates.
  */
 export async function exportIsolatedElementToSvga2(
-  video: HTMLVideoElement,
+  videoSource: HTMLVideoElement | { videoWidth?: number; videoHeight?: number; width?: number; height?: number; duration?: number; currentTime?: number; svgaCanvases?: HTMLCanvasElement[] },
   element: DetectedVideoElement,
   chroma: SmartChromaSettings,
   compression: SmartCompressionConfig,
@@ -1307,8 +1308,22 @@ export async function exportIsolatedElementToSvga2(
   trimEnd: number,
   onProgress?: (percent: number, phase: string) => void
 ): Promise<ElementExportResult> {
-  const vw = video.videoWidth || 1280;
-  const vh = video.videoHeight || 720;
+  const isVideoElem = videoSource instanceof HTMLVideoElement;
+  const originalTime = isVideoElem ? videoSource.currentTime : 0;
+  const seekTo = async (time: number) => {
+    if (!isVideoElem) return;
+    await new Promise<void>((resolve) => {
+      const onSeeked = () => {
+        videoSource.removeEventListener('seeked', onSeeked);
+        resolve();
+      };
+      videoSource.addEventListener('seeked', onSeeked);
+      videoSource.currentTime = time;
+    });
+  };
+
+  const vw = isVideoElem ? (videoSource.videoWidth || 1280) : (videoSource.videoWidth || videoSource.width || 1280);
+  const vh = isVideoElem ? (videoSource.videoHeight || 720) : (videoSource.videoHeight || videoSource.height || 720);
   const duration = Math.max(0.1, trimEnd - trimStart);
   const fps = compression.targetFps || 24;
   const totalFrames = Math.max(1, Math.min(600, Math.round(duration * fps)));
@@ -1358,25 +1373,26 @@ export async function exportIsolatedElementToSvga2(
   let deduplicatedCount = 0;
   let uncompressedBytesEstimate = 0;
 
-  const originalTime = video.currentTime;
-  const seekTo = (t: number) =>
-    new Promise<void>((resolve) => {
-      const onSeeked = () => {
-        video.removeEventListener('seeked', onSeeked);
-        resolve();
-      };
-      video.addEventListener('seeked', onSeeked);
-      video.currentTime = t;
-    });
-
   for (let f = 0; f < totalFrames; f++) {
     const t = trimStart + (f / Math.max(1, totalFrames)) * duration;
     const pct = Math.round(((f + 1) / totalFrames) * 82);
     onProgress?.(pct, `جاري معالجة وعزل الإطار ${f + 1}/${totalFrames} للعنصر (${element.name})...`);
 
-    await seekTo(t);
     fullCtx.clearRect(0, 0, vw, vh);
-    fullCtx.drawImage(video, 0, 0, vw, vh);
+
+    if ('svgaCanvases' in videoSource && videoSource.svgaCanvases && videoSource.svgaCanvases.length > 0) {
+      const srcCanvases = videoSource.svgaCanvases;
+      const srcIdx = Math.min(
+        srcCanvases.length - 1,
+        Math.max(0, Math.floor((f / Math.max(1, totalFrames - 1)) * srcCanvases.length))
+      );
+      if (srcCanvases[srcIdx]) {
+        fullCtx.drawImage(srcCanvases[srcIdx], 0, 0, vw, vh);
+      }
+    } else if (isVideoElem) {
+      await seekTo(t);
+      fullCtx.drawImage(videoSource, 0, 0, vw, vh);
+    }
     const frameImgData = fullCtx.getImageData(0, 0, vw, vh);
 
     // Choose per-frame mask if edited on this frame, otherwise element's spatial mask
