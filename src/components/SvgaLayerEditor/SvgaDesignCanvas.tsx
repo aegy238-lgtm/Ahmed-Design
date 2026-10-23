@@ -42,6 +42,7 @@ interface SvgaDesignCanvasProps {
   shinePointStep?: 'idle' | 'place-start' | 'place-end';
   onShinePointStepChange?: (step: 'idle' | 'place-start' | 'place-end') => void;
   onDragEnd?: () => void;
+  onPausePlayback?: () => void;
 
   // Freehand Pen Mask & Cutout Props
   isChromaPenActive?: boolean;
@@ -484,6 +485,7 @@ export const SvgaDesignCanvas: React.FC<SvgaDesignCanvasProps> = ({
   shinePointStep: externalShinePointStep,
   onShinePointStepChange,
   onDragEnd,
+  onPausePlayback,
   isChromaPenActive = false,
   chromaSubMode = 'pen-mask',
   chromaPenTool = 'brush',
@@ -557,6 +559,21 @@ export const SvgaDesignCanvas: React.FC<SvgaDesignCanvasProps> = ({
   const [initialTransform, setInitialTransform] = useState<EditableLayer['transform'] | null>(null);
   const [initialTransformsMap, setInitialTransformsMap] = useState<Record<string, EditableLayer['transform']>>({});
   const activeDragLayerIdRef = useRef<string | null>(null);
+  const dragSessionRef = useRef<{
+    handle: DragHandleType;
+    layerId: string;
+    startCanvas: Point;
+    startClient: Point;
+    startPan: Point;
+    initialTransform: EditableLayer['transform'];
+    initialBounds: { x: number; y: number; width: number; height: number };
+    visualCenter: Point;
+    visualW: number;
+    visualH: number;
+    uX: Point;
+    uY: Point;
+    vOffset: Point;
+  } | null>(null);
   const [activeGuides, setActiveGuides] = useState<GuideLine[]>([]);
   const [cacheVersion, setCacheVersion] = useState<number>(0);
 
@@ -680,16 +697,24 @@ export const SvgaDesignCanvas: React.FC<SvgaDesignCanvasProps> = ({
   const clientToCanvasCoords = useCallback((clientX: number, clientY: number) => {
     if (!canvasRef.current) return { x: 0, y: 0 };
     const rect = canvasRef.current.getBoundingClientRect();
-    const scale = zoom / 100;
-    const x = (clientX - rect.left) / scale;
-    const y = (clientY - rect.top) / scale;
-    return { x, y };
-  }, [zoom]);
+    if (rect.width > 0 && rect.height > 0) {
+      return {
+        x: (clientX - rect.left) * ((project.width || 500) / rect.width),
+        y: (clientY - rect.top) * ((project.height || 500) / rect.height)
+      };
+    }
+    const scale = Math.max(0.05, zoom / 100);
+    return {
+      x: (clientX - rect.left) / scale,
+      y: (clientY - rect.top) / scale
+    };
+  }, [zoom, project.width, project.height]);
 
   // Compute Total Matrix for a Layer at current frame (incorporating keyframe animations)
-  const computeLayerMatrix = useCallback((layer: EditableLayer, frame: any) => {
+  const computeLayerMatrix = useCallback((layer: EditableLayer, frame: any, effectiveFrameIdx?: number) => {
     const initialBounds = layer.initialBounds;
-    const animTransform = getLayerAnimatedTransform(layer, currentFrame);
+    const targetFrame = effectiveFrameIdx !== undefined ? effectiveFrameIdx : currentFrame;
+    const animTransform = getLayerAnimatedTransform(layer, targetFrame);
 
     const deltaX = animTransform.x - initialBounds.x;
     const deltaY = animTransform.y - initialBounds.y;
@@ -727,17 +752,69 @@ export const SvgaDesignCanvas: React.FC<SvgaDesignCanvasProps> = ({
   }, [currentFrame]);
 
   // Helper to determine if a layer's frame is visible/active at given frameIndex
-  const getLayerFrameState = useCallback((layer: EditableLayer, frameIdx: number) => {
+  const getLayerFrameState = useCallback((layer: EditableLayer, frameIdx: number, allowSelectedFallback: boolean = false) => {
     if (layer.isMerged || (layer.mergedLayers && layer.mergedLayers.length > 0)) {
-      return { isActive: true, frame: { alpha: 1, transform: { a: 1, b: 0, c: 0, d: 1, tx: 0, ty: 0 } }, alpha: 1.0 };
+      return { isActive: true, frame: { alpha: 1, transform: { a: 1, b: 0, c: 0, d: 1, tx: 0, ty: 0 } }, alpha: 1.0, effectiveFrameIdx: frameIdx };
     }
+
+    const resolveFallbackState = () => {
+      const frames = layer.spriteRef?.frames;
+      if (frames && frames.length > 0) {
+        const preferredIdx = layer.keyframeSummary?.activeFrames?.[0] ?? layer.inFrame ?? 0;
+        const preferredFrame = frames[preferredIdx];
+        if (preferredFrame && (typeof preferredFrame.alpha !== 'number' || preferredFrame.alpha > 0.005)) {
+          return {
+            isActive: true,
+            frame: { ...preferredFrame, alpha: typeof preferredFrame.alpha === 'number' && preferredFrame.alpha > 0 ? preferredFrame.alpha : 1 },
+            alpha: typeof preferredFrame.alpha === 'number' && preferredFrame.alpha > 0 ? preferredFrame.alpha : 1.0,
+            effectiveFrameIdx: preferredIdx
+          };
+        }
+        const firstActiveIdx = frames.findIndex((fr: any) => fr && (typeof fr.alpha !== 'number' || fr.alpha > 0.005));
+        if (firstActiveIdx !== -1) {
+          const fr = frames[firstActiveIdx];
+          return {
+            isActive: true,
+            frame: { ...fr, alpha: typeof fr.alpha === 'number' && fr.alpha > 0 ? fr.alpha : 1 },
+            alpha: typeof fr.alpha === 'number' && fr.alpha > 0 ? fr.alpha : 1.0,
+            effectiveFrameIdx: firstActiveIdx
+          };
+        }
+        const firstNonNullIdx = frames.findIndex((fr: any) => Boolean(fr));
+        if (firstNonNullIdx !== -1) {
+          const fr = frames[firstNonNullIdx];
+          return {
+            isActive: true,
+            frame: { ...fr, alpha: 1 },
+            alpha: 1.0,
+            effectiveFrameIdx: firstNonNullIdx
+          };
+        }
+      }
+      return {
+        isActive: true,
+        frame: {
+          alpha: 1,
+          transform: { a: 1, b: 0, c: 0, d: 1, tx: 0, ty: 0 },
+          layout: {
+            x: layer.initialBounds?.x || 0,
+            y: layer.initialBounds?.y || 0,
+            width: layer.initialBounds?.width || layer.transform?.width || 100,
+            height: layer.initialBounds?.height || layer.transform?.height || 100
+          }
+        },
+        alpha: 1.0,
+        effectiveFrameIdx: layer.inFrame ?? 0
+      };
+    };
 
     // Guaranteed visibility and state for video sequence layers
     if (layer.isVideoSequence) {
       const startF = layer.inFrame !== undefined ? layer.inFrame : (layer.keyframeSummary?.startFrame ?? 0);
       const endF = layer.outFrame !== undefined ? layer.outFrame : (layer.keyframeSummary?.endFrame ?? (project.totalFrames - 1));
       if (frameIdx < startF || frameIdx > endF) {
-        return { isActive: false, frame: null, alpha: 0 };
+        if (allowSelectedFallback) return resolveFallbackState();
+        return { isActive: false, frame: null, alpha: 0, effectiveFrameIdx: frameIdx };
       }
       const frames = layer.spriteRef?.frames;
       const frame = (frames && frames[frameIdx]) || (frames && frames[0]) || {
@@ -753,12 +830,16 @@ export const SvgaDesignCanvas: React.FC<SvgaDesignCanvasProps> = ({
           transform: frame.transform || { a: 1, b: 0, c: 0, d: 1, tx: 0, ty: 0 },
           layout: frame.layout || { x: 0, y: 0, width: layer.transform?.width || project.width, height: layer.transform?.height || project.height }
         },
-        alpha: 1.0
+        alpha: 1.0,
+        effectiveFrameIdx: frameIdx
       };
     }
 
     const frames = layer.spriteRef?.frames;
-    if (!frames || frames.length === 0) return { isActive: false, frame: null, alpha: 0 };
+    if (!frames || frames.length === 0) {
+      if (allowSelectedFallback) return resolveFallbackState();
+      return { isActive: false, frame: null, alpha: 0, effectiveFrameIdx: frameIdx };
+    }
 
     const isSingleFrameStatic = frames.length === 1 || layer.framesCount === 1;
 
@@ -768,7 +849,8 @@ export const SvgaDesignCanvas: React.FC<SvgaDesignCanvasProps> = ({
 
     // For non-static layers, check if outside duration span
     if (!isSingleFrameStatic && (frameIdx < startF || frameIdx > endF)) {
-      return { isActive: false, frame: null, alpha: 0 };
+      if (allowSelectedFallback) return resolveFallbackState();
+      return { isActive: false, frame: null, alpha: 0, effectiveFrameIdx: frameIdx };
     }
 
     // Support single-frame static layers and repeated/looping sequence layers
@@ -779,7 +861,10 @@ export const SvgaDesignCanvas: React.FC<SvgaDesignCanvasProps> = ({
       frame = frames[frameIdx % frames.length];
     }
 
-    if (!frame) return { isActive: false, frame: null, alpha: 0 };
+    if (!frame) {
+      if (allowSelectedFallback) return resolveFallbackState();
+      return { isActive: false, frame: null, alpha: 0, effectiveFrameIdx: frameIdx };
+    }
 
     let isActive = false;
     let frameAlpha = 0;
@@ -822,45 +907,109 @@ export const SvgaDesignCanvas: React.FC<SvgaDesignCanvasProps> = ({
       }
     }
 
-    return { isActive, frame, alpha: frameAlpha };
+    if (!isActive && allowSelectedFallback) {
+      return resolveFallbackState();
+    }
+
+    return { isActive, frame, alpha: frameAlpha, effectiveFrameIdx: frameIdx };
   }, [project.totalFrames, project.imagesMap]);
+
+  // Compute visual bounding box & handles geometry for a layer in canvas coordinates
+  const getLayerVisualGeometry = useCallback((layer: EditableLayer, frame: any, effectiveFrameIdx?: number) => {
+    const totalMatrix = computeLayerMatrix(layer, frame, effectiveFrameIdx);
+    const isMergedGroup = layer.isMerged || (layer.mergedLayers && layer.mergedLayers.length > 0);
+    const cachedImg = imagesCache.current[layer.imageKey];
+
+    let localX = 0;
+    let localY = 0;
+    let localW = cachedImg?.naturalWidth || layer.initialBounds.width || 100;
+    let localH = cachedImg?.naturalHeight || layer.initialBounds.height || 100;
+
+    if (isMergedGroup) {
+      localX = layer.initialBounds.x;
+      localY = layer.initialBounds.y;
+      localW = layer.initialBounds.width;
+      localH = layer.initialBounds.height;
+    } else {
+      localX = frame?.layout?.x ?? 0;
+      localY = frame?.layout?.y ?? 0;
+      if (frame?.layout && frame.layout.width > 0) {
+        localW = frame.layout.width;
+      }
+      if (frame?.layout && frame.layout.height > 0) {
+        localH = frame.layout.height;
+      }
+    }
+
+    const p0 = transformPoint(totalMatrix, localX, localY); // top-left
+    const p1 = transformPoint(totalMatrix, localX + localW, localY); // top-right
+    const p2 = transformPoint(totalMatrix, localX + localW, localY + localH); // bottom-right
+    const p3 = transformPoint(totalMatrix, localX, localY + localH); // bottom-left
+
+    const midTop = { x: (p0.x + p1.x) / 2, y: (p0.y + p1.y) / 2 };
+    const midRight = { x: (p1.x + p2.x) / 2, y: (p1.y + p2.y) / 2 };
+    const midBottom = { x: (p2.x + p3.x) / 2, y: (p2.y + p3.y) / 2 };
+    const midLeft = { x: (p3.x + p0.x) / 2, y: (p3.y + p0.y) / 2 };
+    const center = { x: (p0.x + p2.x) / 2, y: (p0.y + p2.y) / 2 };
+
+    const topVectorX = p1.x - p0.x;
+    const topVectorY = p1.y - p0.y;
+    const topLen = Math.hypot(topVectorX, topVectorY) || 1;
+    const leftVectorX = p3.x - p0.x;
+    const leftVectorY = p3.y - p0.y;
+    const leftLen = Math.hypot(leftVectorX, leftVectorY) || 1;
+
+    // Outward normal pointing strictly OUTSIDE the top edge (away from leftVector = p3 - p0)
+    let normalX = topVectorY / topLen;
+    let normalY = -topVectorX / topLen;
+    if (normalX * leftVectorX + normalY * leftVectorY > 0) {
+      normalX = -normalX;
+      normalY = -normalY;
+    }
+
+    const zoomScale = Math.max(0.25, zoom / 100);
+    const rotOffset = Math.max(12, Math.min(34, 24 / zoomScale));
+    const rotHandle = {
+      x: midTop.x + normalX * rotOffset,
+      y: midTop.y + normalY * rotOffset
+    };
+
+    return {
+      totalMatrix,
+      localX,
+      localY,
+      localW,
+      localH,
+      p0,
+      p1,
+      p2,
+      p3,
+      midTop,
+      midRight,
+      midBottom,
+      midLeft,
+      center,
+      topVectorX,
+      topVectorY,
+      topLen,
+      leftVectorX,
+      leftVectorY,
+      leftLen,
+      rotHandle
+    };
+  }, [computeLayerMatrix, zoom]);
 
   // Zoom to Selected Element (Centers and focuses tightly on the selected element)
   const handleZoomToSelection = useCallback(() => {
     if (!selectedLayer || !containerRef.current) return;
-    const { isActive, frame } = getLayerFrameState(selectedLayer, currentFrame);
+    const { isActive, frame, effectiveFrameIdx } = getLayerFrameState(selectedLayer, currentFrame, true);
     if (!isActive || !frame) return;
 
-    const totalMatrix = computeLayerMatrix(selectedLayer, frame);
-    const cachedImg = imagesCache.current[selectedLayer.imageKey];
-    const isMergedGroup = selectedLayer.isMerged || (selectedLayer.mergedLayers && selectedLayer.mergedLayers.length > 0);
-
-    let localX = 0;
-    let localY = 0;
-    let localW = cachedImg?.naturalWidth || selectedLayer.initialBounds.width || 50;
-    let localH = cachedImg?.naturalHeight || selectedLayer.initialBounds.height || 50;
-
-    if (isMergedGroup) {
-      localX = selectedLayer.initialBounds.x;
-      localY = selectedLayer.initialBounds.y;
-      localW = selectedLayer.initialBounds.width;
-      localH = selectedLayer.initialBounds.height;
-    } else if (frame.layout && frame.layout.width > 0 && frame.layout.height > 0) {
-      localX = frame.layout.x || 0;
-      localY = frame.layout.y || 0;
-      localW = frame.layout.width;
-      localH = frame.layout.height;
-    } else if (frame.layout) {
-      localX = frame.layout.x || 0;
-      localY = frame.layout.y || 0;
-    }
-
-    const p0 = transformPoint(totalMatrix, localX, localY);
-    const p2 = transformPoint(totalMatrix, localX + localW, localY + localH);
-    const centerLayerX = (p0.x + p2.x) / 2;
-    const centerLayerY = (p0.y + p2.y) / 2;
-    const layerW = Math.max(20, Math.abs(p2.x - p0.x));
-    const layerH = Math.max(20, Math.abs(p2.y - p0.y));
+    const geom = getLayerVisualGeometry(selectedLayer, frame, effectiveFrameIdx);
+    const centerLayerX = geom.center.x;
+    const centerLayerY = geom.center.y;
+    const layerW = Math.max(20, geom.topLen);
+    const layerH = Math.max(20, geom.leftLen);
 
     const cw = containerRef.current.clientWidth;
     const ch = containerRef.current.clientHeight;
@@ -877,7 +1026,7 @@ export const SvgaDesignCanvas: React.FC<SvgaDesignCanvasProps> = ({
 
     onZoomChange(targetZoom);
     onPanChange({ x: Math.round(panX), y: Math.round(panY) });
-  }, [selectedLayer, currentFrame, getLayerFrameState, computeLayerMatrix, project, onZoomChange, onPanChange]);
+  }, [selectedLayer, currentFrame, getLayerFrameState, getLayerVisualGeometry, project, onZoomChange, onPanChange]);
 
   // Directional Micro-Nudge Function
   const handleMicroNudge = useCallback((dx: number, dy: number) => {
@@ -1016,7 +1165,8 @@ export const SvgaDesignCanvas: React.FC<SvgaDesignCanvasProps> = ({
       alpha: number,
       isMask: boolean = false
     ) => {
-      const { isActive, frame, alpha: frameAlpha } = getLayerFrameState(layerItem, currentFrame);
+      const isSelectedItem = !isMask && (layerItem.id === selectedLayerId || activeSelectedIds.includes(layerItem.id));
+      const { isActive, frame, alpha: frameAlpha } = getLayerFrameState(layerItem, currentFrame, isSelectedItem);
       if (!isActive || !frame || frameAlpha <= 0.005) return;
 
       const fA = frame?.transform?.a ?? 1;
@@ -1188,7 +1338,9 @@ export const SvgaDesignCanvas: React.FC<SvgaDesignCanvasProps> = ({
     ) => {
       if (!layerItem.visible) return;
 
-      const animTransform = getLayerAnimatedTransform(layerItem, currentFrame);
+      const isSelectedItem = layerItem.id === selectedLayerId || activeSelectedIds.includes(layerItem.id);
+      const { effectiveFrameIdx } = getLayerFrameState(layerItem, currentFrame, isSelectedItem);
+      const animTransform = getLayerAnimatedTransform(layerItem, effectiveFrameIdx ?? currentFrame);
       const layerAlpha = Math.max(0, Math.min(1, (animTransform.opacity !== undefined ? animTransform.opacity : layerItem.transform.opacity) / 100));
       const currentAlpha = parentAlpha * layerAlpha;
       if (currentAlpha <= 0.001) return;
@@ -1541,67 +1693,16 @@ export const SvgaDesignCanvas: React.FC<SvgaDesignCanvasProps> = ({
 
     // 5. Draw Selection Transform Box and Handles for Selected Layers
     const layersToHighlight = layers.filter(l => activeSelectedIds.includes(l.id) && l.visible && !l.locked);
+    const zoomScale = Math.max(0.35, zoom / 100);
 
     for (const targetL of layersToHighlight) {
       const isPrimary = targetL.id === selectedLayerId;
-      const { isActive, frame } = getLayerFrameState(targetL, currentFrame);
+      const { isActive, frame, effectiveFrameIdx } = getLayerFrameState(targetL, currentFrame, true);
 
       if (isActive && frame) {
         ctx.save();
-        const totalMatrix = computeLayerMatrix(targetL, frame);
-        const isMergedGroup = targetL.isMerged || (targetL.mergedLayers && targetL.mergedLayers.length > 0);
-        const cachedImg = imagesCache.current[targetL.imageKey];
-
-        let localX = 0;
-        let localY = 0;
-        let localW = cachedImg?.naturalWidth || targetL.initialBounds.width || 100;
-        let localH = cachedImg?.naturalHeight || targetL.initialBounds.height || 100;
-
-        if (isMergedGroup) {
-          localX = targetL.initialBounds.x;
-          localY = targetL.initialBounds.y;
-          localW = targetL.initialBounds.width;
-          localH = targetL.initialBounds.height;
-        } else {
-          localX = frame.layout?.x ?? 0;
-          localY = frame.layout?.y ?? 0;
-          if (frame.layout && frame.layout.width > 0) {
-            localW = frame.layout.width;
-          }
-          if (frame.layout && frame.layout.height > 0) {
-            localH = frame.layout.height;
-          }
-        }
-
-        // Transform 4 corners into canvas coordinates
-        const p0 = transformPoint(totalMatrix, localX, localY); // top-left
-        const p1 = transformPoint(totalMatrix, localX + localW, localY); // top-right
-        const p2 = transformPoint(totalMatrix, localX + localW, localY + localH); // bottom-right
-        const p3 = transformPoint(totalMatrix, localX, localY + localH); // bottom-left
-
-        // Midpoints
-        const midTop = { x: (p0.x + p1.x) / 2, y: (p0.y + p1.y) / 2 };
-        const midRight = { x: (p1.x + p2.x) / 2, y: (p1.y + p2.y) / 2 };
-        const midBottom = { x: (p2.x + p3.x) / 2, y: (p2.y + p3.y) / 2 };
-        const midLeft = { x: (p3.x + p0.x) / 2, y: (p3.y + p0.y) / 2 };
-        const center = { x: (p0.x + p2.x) / 2, y: (p0.y + p2.y) / 2 };
-
-        // Rotation Handle position (extended from midTop)
-        const topVectorX = p1.x - p0.x;
-        const topVectorY = p1.y - p0.y;
-        const topLen = Math.hypot(topVectorX, topVectorY) || 1;
-        const leftVectorX = p3.x - p0.x;
-        const leftVectorY = p3.y - p0.y;
-        const leftLen = Math.hypot(leftVectorX, leftVectorY) || 1;
-
-        // Determine if element is visually small in design units
-        const isSmallElement = topLen < 55 || leftLen < 55;
-        const isTinyElement = topLen < 32 || leftLen < 32;
-
-        const normalX = -topVectorY / topLen;
-        const normalY = topVectorX / topLen;
-        const rotOffset = isTinyElement ? 36 : isSmallElement ? 32 : 28;
-        const rotHandle = { x: midTop.x + normalX * rotOffset, y: midTop.y + normalY * rotOffset };
+        const geom = getLayerVisualGeometry(targetL, frame, effectiveFrameIdx);
+        const { p0, p1, p2, p3, midTop, midRight, midBottom, midLeft, rotHandle } = geom;
 
         // Draw Bounding Polygon for layer
         ctx.beginPath();
@@ -1612,47 +1713,47 @@ export const SvgaDesignCanvas: React.FC<SvgaDesignCanvasProps> = ({
         ctx.closePath();
 
         ctx.strokeStyle = isPrimary ? '#6366f1' : '#f59e0b'; // Indigo for primary, Amber for co-selected
-        ctx.lineWidth = isPrimary ? 2 : 1.5;
+        ctx.lineWidth = Math.max(1, (isPrimary ? 2 : 1.5) / Math.sqrt(zoomScale));
         ctx.stroke();
 
         ctx.strokeStyle = '#ffffff';
-        ctx.lineWidth = 1;
+        ctx.lineWidth = Math.max(0.75, 1 / Math.sqrt(zoomScale));
         ctx.setLineDash([4, 4]);
         ctx.stroke();
         ctx.setLineDash([]);
 
         // Render Transform Handles (for primary layer, or when only 1 is selected)
         if (isPrimary || activeSelectedIds.length === 1) {
-          // Rotation stem
+          // Rotation stem (points strictly OUTSIDE above midTop)
           ctx.beginPath();
           ctx.moveTo(midTop.x, midTop.y);
           ctx.lineTo(rotHandle.x, rotHandle.y);
           ctx.strokeStyle = isPrimary ? '#6366f1' : '#f59e0b';
-          ctx.lineWidth = 1.5;
+          ctx.lineWidth = Math.max(1, 1.5 / Math.sqrt(zoomScale));
           ctx.stroke();
 
           // Rotation Handle circle
+          const rotRadius = Math.max(3.2, Math.min(6.5, 5.5 / Math.sqrt(zoomScale)));
           ctx.beginPath();
-          ctx.arc(rotHandle.x, rotHandle.y, isTinyElement ? 5 : 6, 0, Math.PI * 2);
+          ctx.arc(rotHandle.x, rotHandle.y, rotRadius, 0, Math.PI * 2);
           ctx.fillStyle = isPrimary ? '#a855f7' : '#f59e0b'; // Purple or Amber rotation knob
           ctx.fill();
           ctx.strokeStyle = '#ffffff';
-          ctx.lineWidth = 1.5;
+          ctx.lineWidth = Math.max(1, 1.5 / Math.sqrt(zoomScale));
           ctx.stroke();
 
-          const handlesToDraw = isTinyElement
-            ? [p0, p1, p2, p3]
-            : [p0, midTop, p1, midRight, p2, midBottom, p3, midLeft];
+          // Always draw all 8 resize handles (4 corners + 4 midpoints) so stretching is always available
+          const handlesToDraw = [p0, midTop, p1, midRight, p2, midBottom, p3, midLeft];
+          const handleRadius = Math.max(2.8, Math.min(6, 5 / Math.sqrt(zoomScale)));
 
-          const handleRadius = isTinyElement ? 3.5 : isSmallElement ? 4.5 : 5.5;
-
-          handlesToDraw.forEach(h => {
+          handlesToDraw.forEach((h, idx) => {
+            const isCorner = idx % 2 === 0;
             ctx.beginPath();
-            ctx.arc(h.x, h.y, handleRadius, 0, Math.PI * 2);
+            ctx.arc(h.x, h.y, isCorner ? handleRadius : handleRadius * 0.88, 0, Math.PI * 2);
             ctx.fillStyle = '#ffffff';
             ctx.fill();
             ctx.strokeStyle = isPrimary ? '#6366f1' : '#f59e0b';
-            ctx.lineWidth = 1.8;
+            ctx.lineWidth = Math.max(1, 1.8 / Math.sqrt(zoomScale));
             ctx.stroke();
           });
         }
@@ -1660,80 +1761,64 @@ export const SvgaDesignCanvas: React.FC<SvgaDesignCanvasProps> = ({
         ctx.restore();
       }
     }
-  }, [project, layers, selectedLayer, activeSelectedIds, selectedLayerId, currentFrame, bgColor, showGrid, showGuides, activeGuides, computeLayerMatrix, getLayerFrameState, cacheVersion, fadeConfig, cropConfig, cropFeather, liveShineTime]);
+  }, [project, layers, selectedLayer, activeSelectedIds, selectedLayerId, currentFrame, zoom, bgColor, showGrid, showGuides, activeGuides, getLayerVisualGeometry, getLayerFrameState, cacheVersion, fadeConfig, cropConfig, cropFeather, liveShineTime]);
 
   useEffect(() => {
     drawScene();
   }, [drawScene]);
 
+  // Helper to check if a canvas point (cx, cy) is inside a layer's transformed bounding box
+  const isPointInsideLayerBox = useCallback((layer: EditableLayer, frame: any, cx: number, cy: number, margin: number = 6, effectiveFrameIdx?: number): boolean => {
+    const geom = getLayerVisualGeometry(layer, frame, effectiveFrameIdx);
+    const [a, b, c, d, tx, ty] = geom.totalMatrix;
+    const det = a * d - b * c;
+    if (Math.abs(det) < 0.00001) return false;
+
+    const invA = d / det;
+    const invB = -b / det;
+    const invC = -c / det;
+    const invD = a / det;
+    const invTx = (c * ty - d * tx) / det;
+    const invTy = (b * tx - a * ty) / det;
+
+    const localPointX = invA * cx + invC * cy + invTx;
+    const localPointY = invB * cx + invD * cy + invTy;
+
+    return (
+      localPointX >= geom.localX - margin &&
+      localPointX <= geom.localX + geom.localW + margin &&
+      localPointY >= geom.localY - margin &&
+      localPointY <= geom.localY + geom.localH + margin
+    );
+  }, [getLayerVisualGeometry]);
+
   // Hit test to find layer under cursor (search foreground to background: layers[0] to layers[last])
   // Locked layers are completely skipped so they cannot be clicked/selected on canvas
   const hitTestLayer = useCallback((cx: number, cy: number): string | null => {
     const candidates: Array<{ id: string; area: number; index: number }> = [];
+    const zoomScale = Math.max(0.25, zoom / 100);
 
     for (let i = 0; i < layers.length; i++) {
       const layer = layers[i];
       if (!layer.visible || layer.locked || layer.isMatteMask) continue;
 
-      const { isActive, frame } = getLayerFrameState(layer, currentFrame);
+      const isCurrSelected = layer.id === selectedLayerId || activeSelectedIds.includes(layer.id);
+      const { isActive, frame, effectiveFrameIdx } = getLayerFrameState(layer, currentFrame, isCurrSelected);
       if (!isActive || !frame) continue;
 
-      const totalMatrix = computeLayerMatrix(layer, frame);
-      const isMergedGroup = layer.isMerged || (layer.mergedLayers && layer.mergedLayers.length > 0);
-      const cachedImg = imagesCache.current[layer.imageKey];
+      const geom = getLayerVisualGeometry(layer, frame, effectiveFrameIdx);
+      const hitMargin = Math.max(4, Math.min(14, 8 / zoomScale));
 
-      let localX = 0;
-      let localY = 0;
-      let localW = cachedImg?.naturalWidth || layer.initialBounds.width || 100;
-      let localH = cachedImg?.naturalHeight || layer.initialBounds.height || 100;
-
-      if (isMergedGroup) {
-        localX = layer.initialBounds.x;
-        localY = layer.initialBounds.y;
-        localW = layer.initialBounds.width;
-        localH = layer.initialBounds.height;
-      } else {
-        localX = frame.layout?.x ?? 0;
-        localY = frame.layout?.y ?? 0;
-        if (frame.layout && frame.layout.width > 0) {
-          localW = frame.layout.width;
-        }
-        if (frame.layout && frame.layout.height > 0) {
-          localH = frame.layout.height;
-        }
-      }
-
-      // Invert matrix to test point in local coords
-      const [a, b, c, d, tx, ty] = totalMatrix;
-      const det = a * d - b * c;
-      if (Math.abs(det) < 0.0001) continue;
-
-      const invA = d / det;
-      const invB = -b / det;
-      const invC = -c / det;
-      const invD = a / det;
-      const invTx = (c * ty - d * tx) / det;
-      const invTy = (b * tx - a * ty) / det;
-
-      const localPointX = invA * cx + invC * cy + invTx;
-      const localPointY = invB * cx + invD * cy + invTy;
-
-      const hitMargin = (localW < 40 || localH < 40) ? 14 : 8;
-
-      if (
-        localPointX >= localX - hitMargin &&
-        localPointX <= localX + localW + hitMargin &&
-        localPointY >= localY - hitMargin &&
-        localPointY <= localY + localH + hitMargin
-      ) {
-        const area = Math.abs(localW * localH);
-        candidates.push({ id: layer.id, area, index: i });
+      if (isPointInsideLayerBox(layer, frame, cx, cy, hitMargin, effectiveFrameIdx)) {
+        // CRITICAL FIX: Compute actual visual area on canvas (topLen * leftLen), NOT raw unscaled naturalWidth * naturalHeight!
+        const visualArea = Math.max(1, geom.topLen * geom.leftLen);
+        candidates.push({ id: layer.id, area: visualArea, index: i });
       }
     }
 
     if (candidates.length === 0) return null;
 
-    // Prioritize smaller/focused elements over massive full-canvas layers
+    // Prioritize currently selected layer if it's directly under the cursor and isn't a full-canvas background covering a smaller icon
     candidates.sort((a, b) => {
       const canvasArea = (project.width || 500) * (project.height || 500);
       const aIsFull = a.area >= canvasArea * 0.7;
@@ -1741,79 +1826,33 @@ export const SvgaDesignCanvas: React.FC<SvgaDesignCanvasProps> = ({
       if (aIsFull !== bIsFull) {
         return aIsFull ? 1 : -1;
       }
-      
-      // If one candidate is significantly smaller, prioritize the smaller element (e.g. icon over background panel)
-      const areaRatio = a.area / Math.max(1, b.area);
-      if (areaRatio > 2.0) return 1;
-      if (areaRatio < 0.5) return -1;
 
-      // If currently selected layer is one of the candidates of similar size, keep it
       if (selectedLayer) {
         if (a.id === selectedLayer.id) return -1;
         if (b.id === selectedLayer.id) return 1;
       }
+
+      // If one candidate is significantly smaller on canvas, prioritize the smaller element
+      const areaRatio = a.area / Math.max(1, b.area);
+      if (areaRatio > 2.0) return 1;
+      if (areaRatio < 0.5) return -1;
 
       // Otherwise top-most in z-stack (smaller index in layers array) wins
       return a.index - b.index;
     });
 
     return candidates[0].id;
-  }, [layers, currentFrame, computeLayerMatrix, getLayerFrameState, selectedLayer, project.width, project.height]);
+  }, [layers, currentFrame, zoom, selectedLayerId, activeSelectedIds, getLayerFrameState, getLayerVisualGeometry, isPointInsideLayerBox, selectedLayer, project.width, project.height]);
 
-  // Determine handle under mouse for selected layer
+  // Determine handle under mouse for selected layer (all 8 resize handles + rotation handle + interior move)
   const getHandleUnderMouse = useCallback((cx: number, cy: number): DragHandleType | null => {
-    if (!selectedLayer || selectedLayer.locked) return null;
-    const { isActive, frame } = getLayerFrameState(selectedLayer, currentFrame);
+    if (!selectedLayer || selectedLayer.locked || !selectedLayer.visible) return null;
+    const { isActive, frame, effectiveFrameIdx } = getLayerFrameState(selectedLayer, currentFrame, true);
     if (!isActive || !frame) return null;
 
-    const totalMatrix = computeLayerMatrix(selectedLayer, frame);
-    const isMergedGroup = selectedLayer.isMerged || (selectedLayer.mergedLayers && selectedLayer.mergedLayers.length > 0);
-    const cachedImg = imagesCache.current[selectedLayer.imageKey];
-
-    let localX = 0;
-    let localY = 0;
-    let localW = cachedImg?.naturalWidth || selectedLayer.initialBounds.width || 100;
-    let localH = cachedImg?.naturalHeight || selectedLayer.initialBounds.height || 100;
-
-    if (isMergedGroup) {
-      localX = selectedLayer.initialBounds.x;
-      localY = selectedLayer.initialBounds.y;
-      localW = selectedLayer.initialBounds.width;
-      localH = selectedLayer.initialBounds.height;
-    } else if (frame.layout && frame.layout.width > 0 && frame.layout.height > 0) {
-      localX = frame.layout.x || 0;
-      localY = frame.layout.y || 0;
-      localW = frame.layout.width;
-      localH = frame.layout.height;
-    } else if (frame.layout) {
-      localX = frame.layout.x || 0;
-      localY = frame.layout.y || 0;
-    }
-
-    const p0 = transformPoint(totalMatrix, localX, localY);
-    const p1 = transformPoint(totalMatrix, localX + localW, localY);
-    const p2 = transformPoint(totalMatrix, localX + localW, localY + localH);
-    const p3 = transformPoint(totalMatrix, localX, localY + localH);
-
-    const midTop = { x: (p0.x + p1.x) / 2, y: (p0.y + p1.y) / 2 };
-    const midRight = { x: (p1.x + p2.x) / 2, y: (p1.y + p2.y) / 2 };
-    const midBottom = { x: (p2.x + p3.x) / 2, y: (p2.y + p3.y) / 2 };
-    const midLeft = { x: (p3.x + p0.x) / 2, y: (p3.y + p0.y) / 2 };
-
-    const topVectorX = p1.x - p0.x;
-    const topVectorY = p1.y - p0.y;
-    const topLen = Math.hypot(topVectorX, topVectorY) || 1;
-    const leftVectorX = p3.x - p0.x;
-    const leftVectorY = p3.y - p0.y;
-    const leftLen = Math.hypot(leftVectorX, leftVectorY) || 1;
-
-    const isSmallElement = topLen < 55 || leftLen < 55;
-    const isTinyElement = topLen < 32 || leftLen < 32;
-
-    const normalX = -topVectorY / topLen;
-    const normalY = topVectorX / topLen;
-    const rotOffset = isTinyElement ? 36 : isSmallElement ? 32 : 28;
-    const rotHandle = { x: midTop.x + normalX * rotOffset, y: midTop.y + normalY * rotOffset };
+    const geom = getLayerVisualGeometry(selectedLayer, frame, effectiveFrameIdx);
+    const { p0, p1, p2, p3, midTop, midRight, midBottom, midLeft, rotHandle } = geom;
+    const zoomScale = Math.max(0.25, zoom / 100);
 
     // 0. Shine vector path handles check (if shine enabled on selected layer)
     if (selectedLayer.shineConfig?.enabled && selectedLayer.shineConfig.editPathOnCanvas !== false) {
@@ -1827,32 +1866,51 @@ export const SvgaDesignCanvas: React.FC<SvgaDesignCanvasProps> = ({
       };
       const mPt = { x: (sPt.x + ePt.x) / 2, y: (sPt.y + ePt.y) / 2 };
 
-      if (Math.hypot(cx - sPt.x, cy - sPt.y) <= 26) return 'shine-start';
-      if (Math.hypot(cx - ePt.x, cy - ePt.y) <= 26) return 'shine-end';
-      if (Math.hypot(cx - mPt.x, cy - mPt.y) <= 24) return 'shine-mid';
+      const shineHitDist = Math.max(10, 22 / zoomScale);
+      if (Math.hypot(cx - sPt.x, cy - sPt.y) <= shineHitDist) return 'shine-start';
+      if (Math.hypot(cx - ePt.x, cy - ePt.y) <= shineHitDist) return 'shine-end';
+      if (Math.hypot(cx - mPt.x, cy - mPt.y) <= shineHitDist) return 'shine-mid';
     }
 
-    // 1. Rotation knob test (tested first, outside the box)
-    if (Math.hypot(cx - rotHandle.x, cy - rotHandle.y) <= (isTinyElement ? 10 : 12)) return 'rot';
+    // 1. Check rotation handle + all 8 resize handles (4 corners + 4 midpoints) and pick the closest within hit radius
+    const hitRadius = Math.max(6, Math.min(20, 14 / zoomScale));
+    const handleCandidates: Array<{ type: DragHandleType; pt: Point; bonus: number }> = [
+      { type: 'rot', pt: rotHandle, bonus: 1.5 },
+      { type: 'nw', pt: p0, bonus: 1.0 },
+      { type: 'ne', pt: p1, bonus: 1.0 },
+      { type: 'se', pt: p2, bonus: 1.0 },
+      { type: 'sw', pt: p3, bonus: 1.0 },
+      { type: 'n', pt: midTop, bonus: 0 },
+      { type: 'e', pt: midRight, bonus: 0 },
+      { type: 's', pt: midBottom, bonus: 0 },
+      { type: 'w', pt: midLeft, bonus: 0 },
+    ];
 
-    // 2. Midpoint edge handles test (n, s, e, w) - generous hit distance so 4-way stretching is effortless
-    if (!isTinyElement) {
-      const midHitDist = isSmallElement ? 10 : 13;
-      if (Math.hypot(cx - midTop.x, cy - midTop.y) <= midHitDist) return 'n';
-      if (Math.hypot(cx - midRight.x, cy - midRight.y) <= midHitDist) return 'e';
-      if (Math.hypot(cx - midBottom.x, cy - midBottom.y) <= midHitDist) return 's';
-      if (Math.hypot(cx - midLeft.x, cy - midLeft.y) <= midHitDist) return 'w';
+    let bestHandle: DragHandleType | null = null;
+    let bestScore = Infinity;
+
+    for (const h of handleCandidates) {
+      const d = Math.hypot(cx - h.pt.x, cy - h.pt.y);
+      if (d <= hitRadius) {
+        const score = d - h.bonus;
+        if (score < bestScore) {
+          bestScore = score;
+          bestHandle = h.type;
+        }
+      }
     }
 
-    // 3. Corner resize handles test
-    const cornerHitDist = isTinyElement ? 7 : isSmallElement ? 9 : 12;
-    if (Math.hypot(cx - p0.x, cy - p0.y) <= cornerHitDist) return 'nw';
-    if (Math.hypot(cx - p1.x, cy - p1.y) <= cornerHitDist) return 'ne';
-    if (Math.hypot(cx - p2.x, cy - p2.y) <= cornerHitDist) return 'se';
-    if (Math.hypot(cx - p3.x, cy - p3.y) <= cornerHitDist) return 'sw';
+    if (bestHandle) {
+      return bestHandle;
+    }
+
+    // 2. If cursor is inside the selectedLayer's bounding box, return 'move' directly so dragging the selected layer NEVER loses selection!
+    if (isPointInsideLayerBox(selectedLayer, frame, cx, cy, Math.max(3, 6 / zoomScale), effectiveFrameIdx)) {
+      return 'move';
+    }
 
     return null;
-  }, [selectedLayer, currentFrame, computeLayerMatrix, getLayerFrameState]);
+  }, [selectedLayer, currentFrame, zoom, getLayerFrameState, getLayerVisualGeometry, isPointInsideLayerBox]);
 
   // Global Window MouseUp Listener for Freehand Pen Drawing
   useEffect(() => {
@@ -1882,6 +1940,288 @@ export const SvgaDesignCanvas: React.FC<SvgaDesignCanvasProps> = ({
 
   // Dynamic Hover Cursor
   const [canvasCursor, setCanvasCursor] = useState<string>('default');
+
+  // Helper to initialize a synchronous drag session for a target layer
+  const startLayerDragSession = useCallback((
+    handle: DragHandleType,
+    targetLayer: EditableLayer,
+    startCanvas: Point,
+    clientX: number,
+    clientY: number
+  ) => {
+    onPausePlayback?.();
+    const { frame, effectiveFrameIdx } = getLayerFrameState(targetLayer, currentFrame, true);
+    const geom = getLayerVisualGeometry(targetLayer, frame, effectiveFrameIdx);
+    const animTransform = getLayerAnimatedTransform(targetLayer, effectiveFrameIdx ?? currentFrame);
+
+    const visualW = Math.max(2, geom.topLen);
+    const visualH = Math.max(2, geom.leftLen);
+    const uX = { x: geom.topVectorX / visualW, y: geom.topVectorY / visualW };
+    const uY = { x: geom.leftVectorX / visualH, y: geom.leftVectorY / visualH };
+
+    const initBounds = targetLayer.initialBounds || { x: 0, y: 0, width: 100, height: 100 };
+    const pivotWorld0 = {
+      x: animTransform.x + initBounds.width / 2,
+      y: animTransform.y + initBounds.height / 2
+    };
+    const vOffset = {
+      x: geom.center.x - pivotWorld0.x,
+      y: geom.center.y - pivotWorld0.y
+    };
+
+    const snapTransform: EditableLayer['transform'] = {
+      ...targetLayer.transform,
+      x: animTransform.x,
+      y: animTransform.y,
+      scaleX: animTransform.scaleX,
+      scaleY: animTransform.scaleY,
+      rotation: animTransform.rotation
+    };
+
+    activeDragLayerIdRef.current = targetLayer.id;
+    dragSessionRef.current = {
+      handle,
+      layerId: targetLayer.id,
+      startCanvas,
+      startClient: { x: clientX, y: clientY },
+      startPan: { ...panOffset },
+      initialTransform: snapTransform,
+      initialBounds: { ...initBounds },
+      visualCenter: geom.center,
+      visualW,
+      visualH,
+      uX,
+      uY,
+      vOffset
+    };
+
+    setIsInteracting(true);
+    setDragHandle(handle);
+    setDragStart(startCanvas);
+    setInitialTransform(snapTransform);
+    setInitialTransformsMap({ [targetLayer.id]: snapTransform });
+  }, [onPausePlayback, getLayerFrameState, currentFrame, getLayerVisualGeometry, panOffset]);
+
+  // Core Drag Move Logic (callable from both React onMouseMove and Window mousemove)
+  const processActiveDragMove = useCallback((clientX: number, clientY: number, shiftKey: boolean, altKey: boolean) => {
+    const session = dragSessionRef.current;
+    if (!session) return;
+
+    if (session.handle === 'pan') {
+      const dx = clientX - session.startClient.x;
+      const dy = clientY - session.startClient.y;
+      onPanChange({ x: session.startPan.x + dx, y: session.startPan.y + dy });
+      return;
+    }
+
+    const coords = clientToCanvasCoords(clientX, clientY);
+    const targetDragLayer = layers.find(l => l.id === session.layerId) || selectedLayer;
+    if (!targetDragLayer) return;
+
+    if (session.handle === 'shine-start' && targetDragLayer.shineConfig && onUpdateShineConfig) {
+      const ePt = targetDragLayer.shineConfig.endPoint || {
+        x: Math.round(targetDragLayer.transform.x + targetDragLayer.transform.width / 2),
+        y: Math.round(targetDragLayer.transform.y + targetDragLayer.transform.height + 30)
+      };
+      const newStart = { x: Math.round(coords.x), y: Math.round(coords.y) };
+      const angle = Math.round((Math.atan2(ePt.y - newStart.y, ePt.x - newStart.x) * 180) / Math.PI);
+      onUpdateShineConfig(targetDragLayer.id, { startPoint: newStart, angleDeg: (angle + 360) % 360 });
+      return;
+    }
+
+    if (session.handle === 'shine-end' && targetDragLayer.shineConfig && onUpdateShineConfig) {
+      const sPt = targetDragLayer.shineConfig.startPoint || {
+        x: Math.round(targetDragLayer.transform.x + targetDragLayer.transform.width / 2),
+        y: Math.max(0, Math.round(targetDragLayer.transform.y - 30))
+      };
+      const newEnd = { x: Math.round(coords.x), y: Math.round(coords.y) };
+      const angle = Math.round((Math.atan2(newEnd.y - sPt.y, newEnd.x - sPt.x) * 180) / Math.PI);
+      onUpdateShineConfig(targetDragLayer.id, { endPoint: newEnd, angleDeg: (angle + 360) % 360 });
+      return;
+    }
+
+    if (session.handle === 'shine-mid' && targetDragLayer.shineConfig && onUpdateShineConfig) {
+      const deltaX = coords.x - session.startCanvas.x;
+      const deltaY = coords.y - session.startCanvas.y;
+      const sPt = targetDragLayer.shineConfig.startPoint || {
+        x: Math.round(targetDragLayer.transform.x + targetDragLayer.transform.width / 2),
+        y: Math.max(0, Math.round(targetDragLayer.transform.y - 30))
+      };
+      const ePt = targetDragLayer.shineConfig.endPoint || {
+        x: Math.round(targetDragLayer.transform.x + targetDragLayer.transform.width / 2),
+        y: Math.round(targetDragLayer.transform.y + targetDragLayer.transform.height + 30)
+      };
+      onUpdateShineConfig(targetDragLayer.id, {
+        startPoint: { x: Math.round(sPt.x + deltaX), y: Math.round(sPt.y + deltaY) },
+        endPoint: { x: Math.round(ePt.x + deltaX), y: Math.round(ePt.y + deltaY) }
+      });
+      session.startCanvas = coords;
+      return;
+    }
+
+    const { initialTransform: initTrans, initialBounds: initBounds, visualCenter, visualW, visualH, uX, uY, vOffset } = session;
+    const deltaX = coords.x - session.startCanvas.x;
+    const deltaY = coords.y - session.startCanvas.y;
+
+    if (session.handle === 'move') {
+      let newX = Math.round((initTrans.x + deltaX) * 10) / 10;
+      let newY = Math.round((initTrans.y + deltaY) * 10) / 10;
+
+      // Smart Snapping to Canvas Center using actual visual center
+      const guides: GuideLine[] = [];
+      const curVisualCenterX = visualCenter.x + deltaX;
+      const curVisualCenterY = visualCenter.y + deltaY;
+      const snapThreshold = 5;
+
+      if (Math.abs(curVisualCenterX - project.width / 2) <= snapThreshold) {
+        const snapCorrectionX = project.width / 2 - curVisualCenterX;
+        newX = Math.round((newX + snapCorrectionX) * 10) / 10;
+        guides.push({ type: 'vertical', position: project.width / 2 });
+      }
+      if (Math.abs(curVisualCenterY - project.height / 2) <= snapThreshold) {
+        const snapCorrectionY = project.height / 2 - curVisualCenterY;
+        newY = Math.round((newY + snapCorrectionY) * 10) / 10;
+        guides.push({ type: 'horizontal', position: project.height / 2 });
+      }
+
+      setActiveGuides(guides);
+      onUpdateLayerTransform(targetDragLayer.id, { x: newX, y: newY });
+    } else if (session.handle === 'rot') {
+      // Rotate around the actual visual center on canvas
+      const angleRad = Math.atan2(coords.y - visualCenter.y, coords.x - visualCenter.x);
+      let angleDeg = Math.round((angleRad * 180) / Math.PI) + 90;
+      if (angleDeg > 180) angleDeg -= 360;
+      if (angleDeg < -180) angleDeg += 360;
+
+      if (shiftKey) {
+        angleDeg = Math.round(angleDeg / 45) * 45;
+      }
+
+      const deltaRad = ((angleDeg - initTrans.rotation) * Math.PI) / 180;
+      const rotVOffX = vOffset.x * Math.cos(deltaRad) - vOffset.y * Math.sin(deltaRad);
+      const rotVOffY = vOffset.x * Math.sin(deltaRad) + vOffset.y * Math.cos(deltaRad);
+      const newX = Math.round((initTrans.x + (vOffset.x - rotVOffX)) * 10) / 10;
+      const newY = Math.round((initTrans.y + (vOffset.y - rotVOffY)) * 10) / 10;
+
+      onUpdateLayerTransform(targetDragLayer.id, {
+        rotation: angleDeg,
+        x: newX,
+        y: newY
+      });
+    } else if (['nw', 'ne', 'se', 'sw', 'n', 's', 'e', 'w'].includes(session.handle)) {
+      // Project mouse delta onto the layer's visual axes (uX, uY)
+      const dX = deltaX * uX.x + deltaY * uX.y;
+      const dY = deltaX * uY.x + deltaY * uY.y;
+
+      const h = session.handle;
+      const isCorner = ['nw', 'ne', 'se', 'sw'].includes(h);
+
+      let newVisualW = visualW;
+      let newVisualH = visualH;
+
+      if (h.includes('e')) {
+        newVisualW = Math.max(4, visualW + (altKey ? dX * 2 : dX));
+      } else if (h.includes('w')) {
+        newVisualW = Math.max(4, visualW - (altKey ? dX * 2 : dX));
+      }
+
+      if (h.includes('s')) {
+        newVisualH = Math.max(4, visualH + (altKey ? dY * 2 : dY));
+      } else if (h.includes('n')) {
+        newVisualH = Math.max(4, visualH - (altKey ? dY * 2 : dY));
+      }
+
+      let ratioX = newVisualW / visualW;
+      let ratioY = newVisualH / visualH;
+
+      if (isCorner && (targetDragLayer.aspectRatioLocked || shiftKey)) {
+        // Support both shrinking (ratio < 1) and growing (ratio > 1) smoothly
+        const dominantRatio = Math.abs(dX / visualW) >= Math.abs(dY / visualH) ? ratioX : ratioY;
+        const clampedRatio = Math.max(0.03, dominantRatio);
+        ratioX = clampedRatio;
+        ratioY = clampedRatio;
+        newVisualW = visualW * ratioX;
+        newVisualH = visualH * ratioY;
+      }
+
+      // Compute center shift along uX and uY so the opposite edge/corner stays anchored
+      let shiftAlongX = 0;
+      let shiftAlongY = 0;
+      if (!altKey) {
+        if (h.includes('e')) shiftAlongX = (newVisualW - visualW) / 2;
+        else if (h.includes('w')) shiftAlongX = -(newVisualW - visualW) / 2;
+
+        if (h.includes('s')) shiftAlongY = (newVisualH - visualH) / 2;
+        else if (h.includes('n')) shiftAlongY = -(newVisualH - visualH) / 2;
+      }
+
+      // Compensate for any offset between visualCenter and pivotWorld0 so the layer never jumps
+      const vOffX = vOffset.x * uX.x + vOffset.y * uX.y;
+      const vOffY = vOffset.x * uY.x + vOffset.y * uY.y;
+
+      const totalShiftAlongX = shiftAlongX - vOffX * (ratioX - 1);
+      const totalShiftAlongY = shiftAlongY - vOffY * (ratioY - 1);
+
+      const worldShiftX = totalShiftAlongX * uX.x + totalShiftAlongY * uY.x;
+      const worldShiftY = totalShiftAlongX * uX.y + totalShiftAlongY * uY.y;
+
+      const newX = Math.round((initTrans.x + worldShiftX) * 10) / 10;
+      const newY = Math.round((initTrans.y + worldShiftY) * 10) / 10;
+
+      const signX = initTrans.scaleX < 0 ? -1 : 1;
+      const signY = initTrans.scaleY < 0 ? -1 : 1;
+      const baseScaleX = Math.max(0.01, Math.abs(initTrans.scaleX || 1));
+      const baseScaleY = Math.max(0.01, Math.abs(initTrans.scaleY || 1));
+
+      const newScaleX = signX * Math.max(0.02, Math.min(25, baseScaleX * ratioX));
+      const newScaleY = signY * Math.max(0.02, Math.min(25, baseScaleY * ratioY));
+
+      const baseW = Math.max(4, initBounds.width || initTrans.width || visualW);
+      const baseH = Math.max(4, initBounds.height || initTrans.height || visualH);
+
+      onUpdateLayerTransform(targetDragLayer.id, {
+        x: newX,
+        y: newY,
+        scaleX: parseFloat(newScaleX.toFixed(4)),
+        scaleY: parseFloat(newScaleY.toFixed(4)),
+        width: Math.max(1, Math.round(baseW * Math.abs(newScaleX))),
+        height: Math.max(1, Math.round(baseH * Math.abs(newScaleY)))
+      });
+    }
+  }, [clientToCanvasCoords, layers, selectedLayer, onPanChange, onUpdateShineConfig, onUpdateLayerTransform, project.width, project.height]);
+
+  // Mouse Up Handler
+  const handleMouseUp = useCallback(() => {
+    const session = dragSessionRef.current;
+    if ((session && session.handle !== 'pan') || (isInteracting && dragHandle && dragHandle !== 'pan')) {
+      onDragEnd?.();
+    }
+    dragSessionRef.current = null;
+    activeDragLayerIdRef.current = null;
+    setIsInteracting(false);
+    setDragHandle(null);
+    setInitialTransform(null);
+    setActiveGuides([]);
+  }, [isInteracting, dragHandle, onDragEnd]);
+
+  // Attach global window mousemove & mouseup listeners while dragging so moving over pills or outside viewport never drops the drag
+  useEffect(() => {
+    if (!isInteracting) return;
+
+    const onWindowMouseMove = (ev: MouseEvent) => {
+      processActiveDragMove(ev.clientX, ev.clientY, ev.shiftKey, ev.altKey);
+    };
+    const onWindowMouseUp = () => {
+      handleMouseUp();
+    };
+
+    window.addEventListener('mousemove', onWindowMouseMove);
+    window.addEventListener('mouseup', onWindowMouseUp);
+    return () => {
+      window.removeEventListener('mousemove', onWindowMouseMove);
+      window.removeEventListener('mouseup', onWindowMouseUp);
+    };
+  }, [isInteracting, processActiveDragMove, handleMouseUp]);
 
   // Mouse Down Event Handler
   const handleMouseDown = (e: React.MouseEvent) => {
@@ -1922,6 +2262,21 @@ export const SvgaDesignCanvas: React.FC<SvgaDesignCanvasProps> = ({
     }
 
     if (e.button === 1 || activeTool === 'hand') {
+      dragSessionRef.current = {
+        handle: 'pan',
+        layerId: '',
+        startCanvas: { x: 0, y: 0 },
+        startClient: { x: e.clientX, y: e.clientY },
+        startPan: { ...panOffset },
+        initialTransform: { x: 0, y: 0, width: 100, height: 100, scaleX: 1, scaleY: 1, rotation: 0, opacity: 100 },
+        initialBounds: { x: 0, y: 0, width: 100, height: 100 },
+        visualCenter: { x: 0, y: 0 },
+        visualW: 100,
+        visualH: 100,
+        uX: { x: 1, y: 0 },
+        uY: { x: 0, y: 1 },
+        vOffset: { x: 0, y: 0 }
+      };
       setIsInteracting(true);
       setDragHandle('pan');
       setDragStart({ x: e.clientX, y: e.clientY });
@@ -1953,16 +2308,8 @@ export const SvgaDesignCanvas: React.FC<SvgaDesignCanvasProps> = ({
     const isModifierKey = e.ctrlKey || e.metaKey || e.shiftKey;
     const handle = getHandleUnderMouse(coords.x, coords.y);
 
-    if (handle) {
-      setIsInteracting(true);
-      setDragHandle(handle);
-      setDragStart(coords);
-
-      if (selectedLayer) {
-        activeDragLayerIdRef.current = selectedLayer.id;
-        setInitialTransform({ ...selectedLayer.transform });
-        setInitialTransformsMap({ [selectedLayer.id]: { ...selectedLayer.transform } });
-      }
+    if (handle && selectedLayer) {
+      startLayerDragSession(handle, selectedLayer, coords, e.clientX, e.clientY);
     } else {
       const clickedId = hitTestLayer(coords.x, coords.y);
       if (clickedId) {
@@ -1970,15 +2317,11 @@ export const SvgaDesignCanvas: React.FC<SvgaDesignCanvasProps> = ({
 
         const targetLayer = layers.find(l => l.id === clickedId);
         if (targetLayer) {
-          activeDragLayerIdRef.current = targetLayer.id;
-          setIsInteracting(true);
-          setDragHandle('move');
-          setDragStart(coords);
-          setInitialTransform({ ...targetLayer.transform });
-          setInitialTransformsMap({ [clickedId]: { ...targetLayer.transform } });
+          startLayerDragSession('move', targetLayer, coords, e.clientX, e.clientY);
         }
       } else {
         activeDragLayerIdRef.current = null;
+        dragSessionRef.current = null;
         if (!isModifierKey) {
           onSelectLayer(null, false);
         }
@@ -2005,7 +2348,7 @@ export const SvgaDesignCanvas: React.FC<SvgaDesignCanvasProps> = ({
       return;
     }
 
-    if (!isInteracting) {
+    if (!isInteracting && !dragSessionRef.current) {
       if (activeTool === 'chroma-pen') {
         setCanvasCursor('crosshair');
         if (canvasRef.current) {
@@ -2076,199 +2419,7 @@ export const SvgaDesignCanvas: React.FC<SvgaDesignCanvasProps> = ({
       return;
     }
 
-    if (dragHandle === 'pan') {
-      const dx = e.clientX - dragStart.x;
-      const dy = e.clientY - dragStart.y;
-      onPanChange({ x: panOffset.x + dx, y: panOffset.y + dy });
-      setDragStart({ x: e.clientX, y: e.clientY });
-      return;
-    }
-
-    const coords = clientToCanvasCoords(e.clientX, e.clientY);
-
-    if (dragHandle === 'shine-start' && selectedLayer?.shineConfig && onUpdateShineConfig) {
-      const ePt = selectedLayer.shineConfig.endPoint || {
-        x: Math.round(selectedLayer.transform.x + selectedLayer.transform.width / 2),
-        y: Math.round(selectedLayer.transform.y + selectedLayer.transform.height + 30)
-      };
-      const newStart = { x: Math.round(coords.x), y: Math.round(coords.y) };
-      const angle = Math.round((Math.atan2(ePt.y - newStart.y, ePt.x - newStart.x) * 180) / Math.PI);
-      onUpdateShineConfig(selectedLayer.id, { startPoint: newStart, angleDeg: (angle + 360) % 360 });
-      return;
-    }
-
-    if (dragHandle === 'shine-end' && selectedLayer?.shineConfig && onUpdateShineConfig) {
-      const sPt = selectedLayer.shineConfig.startPoint || {
-        x: Math.round(selectedLayer.transform.x + selectedLayer.transform.width / 2),
-        y: Math.max(0, Math.round(selectedLayer.transform.y - 30))
-      };
-      const newEnd = { x: Math.round(coords.x), y: Math.round(coords.y) };
-      const angle = Math.round((Math.atan2(newEnd.y - sPt.y, newEnd.x - sPt.x) * 180) / Math.PI);
-      onUpdateShineConfig(selectedLayer.id, { endPoint: newEnd, angleDeg: (angle + 360) % 360 });
-      return;
-    }
-
-    if (dragHandle === 'shine-mid' && selectedLayer?.shineConfig && onUpdateShineConfig) {
-      const deltaX = coords.x - dragStart.x;
-      const deltaY = coords.y - dragStart.y;
-      const sPt = selectedLayer.shineConfig.startPoint || {
-        x: Math.round(selectedLayer.transform.x + selectedLayer.transform.width / 2),
-        y: Math.max(0, Math.round(selectedLayer.transform.y - 30))
-      };
-      const ePt = selectedLayer.shineConfig.endPoint || {
-        x: Math.round(selectedLayer.transform.x + selectedLayer.transform.width / 2),
-        y: Math.round(selectedLayer.transform.y + selectedLayer.transform.height + 30)
-      };
-      onUpdateShineConfig(selectedLayer.id, {
-        startPoint: { x: Math.round(sPt.x + deltaX), y: Math.round(sPt.y + deltaY) },
-        endPoint: { x: Math.round(ePt.x + deltaX), y: Math.round(ePt.y + deltaY) }
-      });
-      setDragStart(coords);
-      return;
-    }
-
-    const currentDragId = activeDragLayerIdRef.current || selectedLayer?.id;
-    const targetDragLayer = layers.find(l => l.id === currentDragId) || selectedLayer;
-    if (!targetDragLayer || !initialTransform) return;
-
-    const deltaX = coords.x - dragStart.x;
-    const deltaY = coords.y - dragStart.y;
-
-    if (dragHandle === 'move') {
-      let newX = Math.round(initialTransform.x + deltaX);
-      let newY = Math.round(initialTransform.y + deltaY);
-
-      // Smart Snapping to Canvas Center / Borders
-      const guides: GuideLine[] = [];
-      const cx = newX + targetDragLayer.initialBounds.width / 2;
-      const cy = newY + targetDragLayer.initialBounds.height / 2;
-      const snapThreshold = 6;
-
-      // Horizontal Center snap
-      if (Math.abs(cx - project.width / 2) <= snapThreshold) {
-        newX = Math.round(project.width / 2 - targetDragLayer.initialBounds.width / 2);
-        guides.push({ type: 'vertical', position: project.width / 2 });
-      }
-      // Vertical Center snap
-      if (Math.abs(cy - project.height / 2) <= snapThreshold) {
-        newY = Math.round(project.height / 2 - targetDragLayer.initialBounds.height / 2);
-        guides.push({ type: 'horizontal', position: project.height / 2 });
-      }
-
-      setActiveGuides(guides);
-      onUpdateLayerTransform(targetDragLayer.id, { x: newX, y: newY });
-    } else if (dragHandle === 'rot') {
-      // Rotation Handle Dragging
-      const pivotX = targetDragLayer.initialBounds.x + targetDragLayer.initialBounds.width / 2;
-      const pivotY = targetDragLayer.initialBounds.y + targetDragLayer.initialBounds.height / 2;
-      const centerCanvasX = pivotX + (initialTransform.x - targetDragLayer.initialBounds.x);
-      const centerCanvasY = pivotY + (initialTransform.y - targetDragLayer.initialBounds.y);
-
-      const angleRad = Math.atan2(coords.y - centerCanvasY, coords.x - centerCanvasX);
-      let angleDeg = Math.round((angleRad * 180) / Math.PI) + 90;
-      if (angleDeg > 180) angleDeg -= 360;
-      if (angleDeg < -180) angleDeg += 360;
-
-      // Snap to 45 degree increments if shift is pressed
-      if (e.shiftKey) {
-        angleDeg = Math.round(angleDeg / 45) * 45;
-      }
-
-      onUpdateLayerTransform(targetDragLayer.id, { rotation: angleDeg });
-    } else if (['nw', 'ne', 'se', 'sw', 'n', 's', 'e', 'w'].includes(dragHandle || '')) {
-      // Scaling Resize Handles
-      const initW = Math.max(10, targetDragLayer.initialBounds.width);
-      const initH = Math.max(10, targetDragLayer.initialBounds.height);
-      const origW = initW * initialTransform.scaleX;
-      const origH = initH * initialTransform.scaleY;
-
-      // Inverse-rotate the delta to local layer coordinates
-      const angleRad = (-initialTransform.rotation * Math.PI) / 180;
-      const cosA = Math.cos(angleRad);
-      const sinA = Math.sin(angleRad);
-      const localDeltaX = deltaX * cosA - deltaY * sinA;
-      const localDeltaY = deltaX * sinA + deltaY * cosA;
-
-      const isEdgeHandle = ['n', 's', 'e', 'w'].includes(dragHandle || '');
-
-      let newScaleX = initialTransform.scaleX;
-      let newScaleY = initialTransform.scaleY;
-      let newW = origW;
-      let newH = origH;
-      let localShiftX = 0;
-      let localShiftY = 0;
-
-      if (isEdgeHandle) {
-        // 4-Directional Pure Single-Axis Stretches (Edge Midpoints: n, s, e, w)
-        // Stretches/compresses purely along that single direction, never forcing both dimensions together
-        if (dragHandle === 'e') {
-          newW = Math.max(5, origW + (e.altKey ? localDeltaX * 2 : localDeltaX));
-          newScaleX = newW / initW;
-          localShiftX = e.altKey ? 0 : (newW - origW) / 2;
-        } else if (dragHandle === 'w') {
-          newW = Math.max(5, origW - (e.altKey ? localDeltaX * 2 : localDeltaX));
-          newScaleX = newW / initW;
-          localShiftX = e.altKey ? 0 : -(newW - origW) / 2;
-        } else if (dragHandle === 's') {
-          newH = Math.max(5, origH + (e.altKey ? localDeltaY * 2 : localDeltaY));
-          newScaleY = newH / initH;
-          localShiftY = e.altKey ? 0 : (newH - origH) / 2;
-        } else if (dragHandle === 'n') {
-          newH = Math.max(5, origH - (e.altKey ? localDeltaY * 2 : localDeltaY));
-          newScaleY = newH / initH;
-          localShiftY = e.altKey ? 0 : -(newH - origH) / 2;
-        }
-      } else {
-        // Corner handles (nw, ne, se, sw)
-        let factorX = 1;
-        let factorY = 1;
-        if (dragHandle?.includes('e')) factorX = 1 + (localDeltaX * 2) / (initW * initialTransform.scaleX);
-        if (dragHandle?.includes('w')) factorX = 1 - (localDeltaX * 2) / (initW * initialTransform.scaleX);
-        if (dragHandle?.includes('s')) factorY = 1 + (localDeltaY * 2) / (initH * initialTransform.scaleY);
-        if (dragHandle?.includes('n')) factorY = 1 - (localDeltaY * 2) / (initH * initialTransform.scaleY);
-
-        if (targetDragLayer.aspectRatioLocked || e.shiftKey) {
-          const factor = Math.max(factorX, factorY);
-          factorX = factor;
-          factorY = factor;
-        }
-
-        const multX = Math.max(0.05, factorX);
-        const multY = Math.max(0.05, factorY);
-        newScaleX = Math.max(0.05, Math.min(10, initialTransform.scaleX * multX));
-        newScaleY = Math.max(0.05, Math.min(10, initialTransform.scaleY * multY));
-        newW = Math.round(initW * newScaleX);
-        newH = Math.round(initH * newScaleY);
-      }
-
-      // Convert local shift to world canvas coordinates
-      const rotRad = (initialTransform.rotation * Math.PI) / 180;
-      const worldShiftX = localShiftX * Math.cos(rotRad) - localShiftY * Math.sin(rotRad);
-      const worldShiftY = localShiftX * Math.sin(rotRad) + localShiftY * Math.cos(rotRad);
-      const newX = Math.round(initialTransform.x + worldShiftX);
-      const newY = Math.round(initialTransform.y + worldShiftY);
-
-      onUpdateLayerTransform(targetDragLayer.id, {
-        x: newX,
-        y: newY,
-        scaleX: parseFloat(newScaleX.toFixed(3)),
-        scaleY: parseFloat(newScaleY.toFixed(3)),
-        width: Math.round(newW),
-        height: Math.round(newH)
-      });
-    }
-  };
-
-  // Mouse Up Handler
-  const handleMouseUp = () => {
-    if (isInteracting && dragHandle && dragHandle !== 'pan') {
-      onDragEnd?.();
-    }
-    activeDragLayerIdRef.current = null;
-    setIsInteracting(false);
-    setDragHandle(null);
-    setInitialTransform(null);
-    setActiveGuides([]);
+    processActiveDragMove(e.clientX, e.clientY, e.shiftKey, e.altKey);
   };
 
   // Wheel Zoom / Pan
@@ -2294,7 +2445,6 @@ export const SvgaDesignCanvas: React.FC<SvgaDesignCanvasProps> = ({
       onMouseMove={handleMouseMove}
       onMouseUp={handleMouseUp}
       onMouseLeave={() => {
-        handleMouseUp();
         setChromaLoupe(null);
         onChromaHoverColor?.(null);
       }}

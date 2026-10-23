@@ -1384,12 +1384,45 @@ export const SvgaLayerEditor: React.FC<SvgaLayerEditorProps> = ({
 
       return prev.map(l => {
         if (l.id === layerId) {
+          const prevT = l.transform;
+          const nextT = {
+            ...prevT,
+            ...deltaTransform
+          };
+
+          let nextKeyframes = l.keyframes;
+          if (l.keyframes && l.keyframes.length > 0) {
+            const dx = deltaTransform.x !== undefined ? deltaTransform.x - prevT.x : 0;
+            const dy = deltaTransform.y !== undefined ? deltaTransform.y - prevT.y : 0;
+            const scaleRatioX = (deltaTransform.scaleX !== undefined && Math.abs(prevT.scaleX) > 0.0001)
+              ? deltaTransform.scaleX / prevT.scaleX
+              : 1;
+            const scaleRatioY = (deltaTransform.scaleY !== undefined && Math.abs(prevT.scaleY) > 0.0001)
+              ? deltaTransform.scaleY / prevT.scaleY
+              : 1;
+            const dRot = deltaTransform.rotation !== undefined ? deltaTransform.rotation - prevT.rotation : 0;
+
+            nextKeyframes = l.keyframes.map(kf => ({
+              ...kf,
+              x: kf.x !== undefined ? Number((kf.x + dx).toFixed(2)) : (deltaTransform.x !== undefined ? nextT.x : kf.x),
+              y: kf.y !== undefined ? Number((kf.y + dy).toFixed(2)) : (deltaTransform.y !== undefined ? nextT.y : kf.y),
+              scaleX: kf.scaleX !== undefined && deltaTransform.scaleX !== undefined
+                ? Number((kf.scaleX * scaleRatioX).toFixed(4))
+                : kf.scaleX,
+              scaleY: kf.scaleY !== undefined && deltaTransform.scaleY !== undefined
+                ? Number((kf.scaleY * scaleRatioY).toFixed(4))
+                : kf.scaleY,
+              rotation: kf.rotation !== undefined && deltaTransform.rotation !== undefined
+                ? Number((kf.rotation + dRot).toFixed(2))
+                : kf.rotation,
+              opacity: deltaTransform.opacity !== undefined ? deltaTransform.opacity : kf.opacity
+            }));
+          }
+
           return {
             ...l,
-            transform: {
-              ...l.transform,
-              ...deltaTransform
-            }
+            transform: nextT,
+            keyframes: nextKeyframes
           };
         }
         return l;
@@ -1621,12 +1654,43 @@ export const SvgaLayerEditor: React.FC<SvgaLayerEditorProps> = ({
     setLayers(prev => prev.map(l => {
       const delta = updatesMap.get(l.id);
       if (delta) {
+        const prevT = l.transform;
+        const nextT = {
+          ...prevT,
+          ...delta
+        };
+        let nextKeyframes = l.keyframes;
+        if (l.keyframes && l.keyframes.length > 0) {
+          const dx = delta.x !== undefined ? delta.x - prevT.x : 0;
+          const dy = delta.y !== undefined ? delta.y - prevT.y : 0;
+          const scaleRatioX = (delta.scaleX !== undefined && Math.abs(prevT.scaleX) > 0.0001)
+            ? delta.scaleX / prevT.scaleX
+            : 1;
+          const scaleRatioY = (delta.scaleY !== undefined && Math.abs(prevT.scaleY) > 0.0001)
+            ? delta.scaleY / prevT.scaleY
+            : 1;
+          const dRot = delta.rotation !== undefined ? delta.rotation - prevT.rotation : 0;
+
+          nextKeyframes = l.keyframes.map(kf => ({
+            ...kf,
+            x: kf.x !== undefined ? Number((kf.x + dx).toFixed(2)) : (delta.x !== undefined ? nextT.x : kf.x),
+            y: kf.y !== undefined ? Number((kf.y + dy).toFixed(2)) : (delta.y !== undefined ? nextT.y : kf.y),
+            scaleX: kf.scaleX !== undefined && delta.scaleX !== undefined
+              ? Number((kf.scaleX * scaleRatioX).toFixed(4))
+              : kf.scaleX,
+            scaleY: kf.scaleY !== undefined && delta.scaleY !== undefined
+              ? Number((kf.scaleY * scaleRatioY).toFixed(4))
+              : kf.scaleY,
+            rotation: kf.rotation !== undefined && delta.rotation !== undefined
+              ? Number((kf.rotation + dRot).toFixed(2))
+              : kf.rotation,
+            opacity: delta.opacity !== undefined ? delta.opacity : kf.opacity
+          }));
+        }
         return {
           ...l,
-          transform: {
-            ...l.transform,
-            ...delta
-          }
+          transform: nextT,
+          keyframes: nextKeyframes
         };
       }
       return l;
@@ -4209,6 +4273,7 @@ export const SvgaLayerEditor: React.FC<SvgaLayerEditorProps> = ({
                     shinePointStep={shinePointStep}
                     onShinePointStepChange={setShinePointStep}
                     onDragEnd={() => pushHistory(layers)}
+                    onPausePlayback={() => setIsPlaying(false)}
                     isChromaPenActive={isChromaPenActive}
                     chromaSubMode={chromaSubMode}
                     chromaPenTool={chromaPenTool}
