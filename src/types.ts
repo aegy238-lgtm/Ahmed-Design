@@ -191,11 +191,24 @@ export interface AppSettings {
   vibFeatures?: string[]; // قائمة معرّفات الميزات الحصرية للـ VIP
   screenshotProtectionEnabled?: boolean; // حماية لقطات الشاشة
   screenRecordingProtectionEnabled?: boolean; // حماية تسجيل الشاشة
+  windowsInstallerConfig?: WindowsInstallerConfig;
   costs: {
     svgaProcess: number;
     batchCompress: number;
     vipPrice: number;
   }
+}
+
+export interface WindowsInstallerConfig {
+  brandTitle: string;
+  desktopAppName: string;
+  description: string;
+  version: string;
+  installPath: string;
+  createDesktopShortcut: boolean;
+  launchAfterInstall: boolean;
+  logoDataUrl?: string;
+  updatedAt?: string;
 }
 
 export interface AccountVersionHistory {

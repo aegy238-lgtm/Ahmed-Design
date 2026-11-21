@@ -8,6 +8,7 @@ import audioRouter from "./src/server/audioRouter";
 import exportJobsRouter from "./src/server/exportJobsRouter";
 import storageRouter from "./src/server/storageRouter";
 import telegramRouter from "./src/server/telegramRouter";
+import windowsInstallerRouter from "./src/server/windowsInstallerRouter";
 
 // In-memory maintenance cache for instant fast response
 let serverMaintenanceState = {
@@ -156,6 +157,7 @@ async function startServer() {
   app.use('/api/export-jobs', exportJobsRouter);
   app.use('/api/storage', storageRouter);
   app.use('/api/telegram', telegramRouter);
+  app.use('/api/windows-installer', windowsInstallerRouter);
 
   // Direct In-Memory Download Buffer Store for Reliable Downloads
   const downloadStore = new Map<string, { buffer: Buffer, mime: string, name: string, expires: number }>();

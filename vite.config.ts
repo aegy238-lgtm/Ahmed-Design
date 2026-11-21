@@ -49,7 +49,6 @@ export default defineConfig(({ mode }) => {
       ],
       assetsInclude: ['**/*.svga', '**/*.proto', '**/*.wasm'],
       define: {
-        'process.env.API_KEY': JSON.stringify(env.GEMINI_API_KEY),
         '__APP_VERSION__': JSON.stringify(APP_VERSION),
         '__BUILD_TIMESTAMP__': JSON.stringify(BUILD_TIMESTAMP),
         '__BUILD_NUMBER__': JSON.stringify(BUILD_NUMBER),

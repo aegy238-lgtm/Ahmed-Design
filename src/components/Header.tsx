@@ -7,13 +7,14 @@ import {
   Zap, Sparkles, Info, Search, ChevronDown, ChevronUp, Check, LayoutGrid, 
   Command, Wand, Cpu, Repeat, RefreshCw, User, GitBranch, Pin, PinOff,
   BookOpen, Eye, EyeOff, ChevronLeft, ChevronRight, Grid, Star, Globe, Crown,
-  AlertTriangle, AlertCircle, Film, SlidersHorizontal
+  AlertTriangle, AlertCircle, Film, SlidersHorizontal, MonitorDown
 } from 'lucide-react';
 import { calculateSubscriptionInfo } from '../utils/subscriptionUtils';
 import { useLanguage } from '../contexts/LanguageContext';
 import { SUPPORTED_LANGUAGES } from './LanguageTranslatorWidget';
 import { CURRENT_APP_VERSION, BUILD_NUMBER } from '../utils/versionControl';
 import { VersionInfoModal } from './VersionInfoModal';
+import { WindowsInstallerModal } from './WindowsInstallerModal';
 import { useStarredTools } from '../utils/starredTools';
 import { useThemeDimensions } from '../contexts/ThemeDimensionsContext';
 import { PWAAndroidActionButtons } from './PWAAndroidActionButtons';
@@ -85,6 +86,7 @@ export const Header: React.FC<HeaderProps> = (props) => {
   const [isAllToolsOpen, setIsAllToolsOpen] = useState(false);
   const [allToolsSearch, setAllToolsSearch] = useState('');
   const [isVersionModalOpen, setIsVersionModalOpen] = useState(false);
+  const [isWindowsInstallerOpen, setIsWindowsInstallerOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [infoModalTool, setInfoModalTool] = useState<ToolDefinition | null>(null);
   const [selectedCategory, setSelectedCategory] = useState<string>('all');
@@ -1041,6 +1043,22 @@ export const Header: React.FC<HeaderProps> = (props) => {
 
               {props.isAdmin && (
                 <button
+                  type="button"
+                  onClick={() => setIsWindowsInstallerOpen(true)}
+                  className={`h-7 px-2 rounded-lg transition-all duration-200 border flex items-center justify-center gap-1 shrink-0 cursor-pointer ${
+                    isWindowsInstallerOpen
+                      ? 'bg-purple-600/30 text-purple-200 border-purple-400/60 shadow-sm shadow-purple-600/30'
+                      : 'bg-purple-600/15 hover:bg-purple-600/30 text-purple-300 hover:text-white border-purple-500/35 hover:border-purple-400/60'
+                  }`}
+                  title="تنزيل مثبّت نسخة الويندوز الأوفلاين (للمدير فقط)"
+                >
+                  <MonitorDown className="w-3.5 h-3.5 shrink-0" />
+                  <span className="hidden xl:inline text-[10px] font-black whitespace-nowrap">ويندوز</span>
+                </button>
+              )}
+
+              {props.isAdmin && (
+                <button
                   onClick={props.onAdminToggle}
                   className={`w-7 h-7 rounded-lg transition-all duration-200 border flex items-center justify-center shrink-0 cursor-pointer ${
                     props.isAdminOpen 
@@ -1760,6 +1778,16 @@ export const Header: React.FC<HeaderProps> = (props) => {
         isOpen={isVersionModalOpen} 
         onClose={() => setIsVersionModalOpen(false)} 
       />
+
+      {/* Admin-Only Windows Offline Installer Studio Modal (Passcode Protected) */}
+      {props.isAdmin && (
+        <WindowsInstallerModal
+          isOpen={isWindowsInstallerOpen}
+          onClose={() => setIsWindowsInstallerOpen(false)}
+          isAdmin={props.isAdmin}
+          settings={props.settings}
+        />
+      )}
 
     </>
   );
